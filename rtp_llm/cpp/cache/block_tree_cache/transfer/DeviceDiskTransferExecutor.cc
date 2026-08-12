@@ -162,7 +162,7 @@ DeviceDiskTransferExecutor::execute(const std::vector<TransferDescriptor>& descr
             schedule             = true;
         }
     }
-    if (schedule && !disk_to_staging_task_pool_->trySubmit([this] { drainStageOne(); })) {
+    if (schedule && !disk_to_staging_task_pool_->submit([this] { drainStageOne(); })) {
         std::deque<std::shared_ptr<BatchState>> rejected;
         {
             std::lock_guard<std::mutex> lock(pending_mutex_);
@@ -285,7 +285,7 @@ void DeviceDiskTransferExecutor::drainStageOne() {
         }
 
         setPoolState(*pool_index, PoolState::STAGE2_READY);
-        const bool accepted = staging_to_device_task_pool_->trySubmit([this, pool_work] {
+        const bool accepted = staging_to_device_task_pool_->submit([this, pool_work] {
             setPoolState(pool_work->pool_index, PoolState::STAGE2_IN_FLIGHT);
             for (const auto& slice : pool_work->slices) {
                 try {

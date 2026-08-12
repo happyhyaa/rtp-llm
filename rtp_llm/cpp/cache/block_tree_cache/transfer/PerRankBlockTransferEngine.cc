@@ -247,7 +247,7 @@ PerRankBlockTransferEngine::submit(const std::vector<TransferDescriptor>& descri
     }
 
     auto context = std::make_shared<TransferBatchAsyncContext>(std::move(reservation));
-    const bool accepted = task_pool->trySubmit([this, descriptors, group_sets, hosts, context] {
+    const bool accepted = task_pool->submit([this, descriptors, group_sets, hosts, context] {
         try {
             for (size_t begin = 0; begin < descriptors.size(); begin += max_descriptors_per_batch_) {
                 const size_t end = std::min(begin + max_descriptors_per_batch_, descriptors.size());
