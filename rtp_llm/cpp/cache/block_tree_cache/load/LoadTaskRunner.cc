@@ -83,22 +83,18 @@ bool LoadTaskRunner::runTransfer(Task&                          task,
             disk_transfer_started = true;
         }
 
-        const std::shared_ptr<AsyncContext> host_context =
-            transfer_dispatcher.executeMultiRank(task.host_to_device_descriptors, host_timeout_ms);
-        const std::shared_ptr<AsyncContext> disk_context =
-            transfer_dispatcher.executeMultiRank(task.disk_to_device_descriptors, disk_timeout_ms);
-        FusedAsyncContext fused_context({host_context, disk_context});
-        fused_context.waitDone();
-        const bool copy_success = fused_context.success();
+        bool copy_success = transfer_dispatcher.executeMultiRank(task.host_to_device_descriptors, host_timeout_ms);
         if (copy_success) {
             for (const TransferDescriptor& desc : task.host_to_device_descriptors) {
                 metrics_reporter.accumulateTransferBytes(desc, group_sets_[desc.group_set_id], host_transfer_bytes);
             }
-            for (const TransferDescriptor& desc : task.disk_to_device_descriptors) {
-                metrics_reporter.accumulateTransferBytes(desc, group_sets_[desc.group_set_id], disk_transfer_bytes);
+            copy_success = transfer_dispatcher.executeMultiRank(task.disk_to_device_descriptors, disk_timeout_ms);
+            if (copy_success) {
+                for (const TransferDescriptor& desc : task.disk_to_device_descriptors) {
+                    metrics_reporter.accumulateTransferBytes(
+                        desc, group_sets_[desc.group_set_id], disk_transfer_bytes);
+                }
             }
-        } else {
-            RTP_LLM_LOG_WARNING("load transfer batch failed: %s", fused_context.errorInfo().ToString().c_str());
         }
         finish_metrics(copy_success);
         return copy_success;

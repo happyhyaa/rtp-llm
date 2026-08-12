@@ -141,13 +141,7 @@ void BlockTreeStorer::runStoreTask(const StoreTaskPtr& task) {
     const int64_t transfer_begin_time_us =
         metrics_reporter_.reportTransferStarted(CacheTransferOperation::STORE, Tier::DEVICE, task->target_tier);
     try {
-        const std::shared_ptr<AsyncContext> context =
-            transfer_dispatcher_->executeMultiRank(task->descriptors, timeout_ms);
-        context->waitDone();
-        copy_success = context->success();
-        if (!copy_success) {
-            RTP_LLM_LOG_WARNING("store transfer batch failed: %s", context->errorInfo().ToString().c_str());
-        }
+        copy_success = transfer_dispatcher_->executeMultiRank(task->descriptors, timeout_ms);
     } catch (const std::exception& error) {
         RTP_LLM_LOG_ERROR("store copy threw: %s", error.what());
     } catch (...) {
