@@ -51,17 +51,17 @@ public:
         throw_on_submit_(throw_on_submit),
         succeed_(succeed) {}
 
-    std::shared_ptr<AsyncContext> submit(const TransferDescriptor& descriptor) override {
+    std::shared_ptr<AsyncContext> submit(const std::vector<TransferDescriptor>& descriptors) override {
         size_t submit_index = 0;
         {
             std::unique_lock<std::mutex> lock(mutex_);
             if (!pause_enabled_) {
                 lock.unlock();
-                return PerRankBlockTransferEngine::submit(descriptor);
+                return PerRankBlockTransferEngine::submit(descriptors);
             }
             ++submit_count_;
             submit_index = submit_count_;
-            descriptors_.push_back(descriptor);
+            descriptors_.insert(descriptors_.end(), descriptors.begin(), descriptors.end());
             entered_ = true;
             cv_.notify_all();
             cv_.wait(lock, [this] { return released_; });
@@ -73,7 +73,7 @@ public:
             return std::make_shared<CompletedAsyncContext>(
                 ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "scripted transfer failure"));
         }
-        return PerRankBlockTransferEngine::submit(descriptor);
+        return PerRankBlockTransferEngine::submit(descriptors);
     }
 
     void enablePause() {
@@ -151,9 +151,9 @@ public:
     explicit ThrowingPerRankBlockTransferEngine(const std::vector<GroupSetPtr>& groups):
         PerRankBlockTransferEngine(groups) {}
 
-    std::shared_ptr<AsyncContext> submit(const TransferDescriptor& descriptor) override {
+    std::shared_ptr<AsyncContext> submit(const std::vector<TransferDescriptor>& descriptors) override {
         if (!throw_enabled_) {
-            return PerRankBlockTransferEngine::submit(descriptor);
+            return PerRankBlockTransferEngine::submit(descriptors);
         }
         throw std::runtime_error("injected load copy failure");
     }

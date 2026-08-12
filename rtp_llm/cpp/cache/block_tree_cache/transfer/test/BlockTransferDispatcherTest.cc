@@ -31,7 +31,7 @@ public:
     explicit ScriptedPerRankEngine(std::deque<std::shared_ptr<AsyncContext>> contexts = {}):
         PerRankBlockTransferEngine(std::vector<GroupSetPtr>{}), contexts_(std::move(contexts)) {}
 
-    std::shared_ptr<AsyncContext> submit(const TransferDescriptor&) override {
+    std::shared_ptr<AsyncContext> submit(const std::vector<TransferDescriptor>&) override {
         ++submit_count_;
         if (contexts_.empty()) {
             return okContext();
@@ -109,9 +109,12 @@ void runPendingCase(bool succeed) {
     auto engine  = std::make_shared<ScriptedPerRankEngine>(std::deque<std::shared_ptr<AsyncContext>>{pending});
     BlockTransferDispatcher dispatcher(engine);
 
+    auto              context = dispatcher.executeMultiRank({descriptor(0)}, 100);
     std::atomic<bool> result{!succeed};
-    std::thread       worker(
-        [&] { result.store(dispatcher.executeMultiRank({descriptor(0)}, 100), std::memory_order_release); });
+    std::thread       worker([&] {
+        context->waitDone();
+        result.store(context->success(), std::memory_order_release);
+    });
 
     const bool wait_entered = pending->waitUntilWaitEnteredFor(std::chrono::seconds(5));
     if (wait_entered) {
@@ -124,26 +127,32 @@ void runPendingCase(bool succeed) {
     EXPECT_EQ(result.load(std::memory_order_acquire), succeed);
 }
 
-TEST(BlockTransferDispatcherTest, TransferDescriptorUsesPerRankEntry) {
+TEST(BlockTransferDispatcherTest, DescriptorVectorUsesPerRankEntry) {
     std::shared_ptr<ScriptedPerRankEngine> engine = std::make_shared<ScriptedPerRankEngine>();
     BlockTransferDispatcher                dispatcher(engine);
 
-    EXPECT_TRUE(dispatcher.executePerRank(TransferDescriptor::hostToDisk(0, 1, 1)));
+    auto context = dispatcher.executePerRank({TransferDescriptor::hostToDisk(0, 1, 1)});
+    context->waitDone();
+    EXPECT_TRUE(context->success());
     EXPECT_EQ(engine->submitCount(), 1u);
 }
 
 TEST(BlockTransferDispatcherTest, EmptyBatchSucceedsWithoutAnEngine) {
     BlockTransferDispatcher dispatcher(nullptr);
-    EXPECT_TRUE(dispatcher.executeMultiRank({}, 0));
+    auto context = dispatcher.executeMultiRank({}, 0);
+    context->waitDone();
+    EXPECT_TRUE(context->success());
 }
 
-TEST(BlockTransferDispatcherTest, PerRankBatchStopsAtFirstFailure) {
+TEST(BlockTransferDispatcherTest, PerRankBatchUsesOneSubmit) {
     auto engine = std::make_shared<ScriptedPerRankEngine>(
         std::deque<std::shared_ptr<AsyncContext>>{okContext(), failedContext(), okContext()});
     BlockTransferDispatcher dispatcher(engine);
 
-    EXPECT_FALSE(dispatcher.executeMultiRank({descriptor(0), descriptor(1), descriptor(2)}, 100));
-    EXPECT_EQ(engine->submitCount(), 2u);
+    auto context = dispatcher.executeMultiRank({descriptor(0), descriptor(1), descriptor(2)}, 100);
+    context->waitDone();
+    EXPECT_TRUE(context->success());
+    EXPECT_EQ(engine->submitCount(), 1u);
 }
 
 TEST(BlockTransferDispatcherTest, MultiRankFailureDoesNotFallbackToPerRank) {
@@ -155,7 +164,9 @@ TEST(BlockTransferDispatcherTest, MultiRankFailureDoesNotFallbackToPerRank) {
     BlockTransferDispatcher dispatcher(per_rank_engine, multi_rank_engine);
 
     const TransferDescriptor unsupported;
-    EXPECT_FALSE(dispatcher.executeMultiRank({unsupported}, 100));
+    auto context = dispatcher.executeMultiRank({unsupported}, 100);
+    context->waitDone();
+    EXPECT_FALSE(context->success());
     EXPECT_EQ(per_rank_engine->submitCount(), 0u);
 }
 

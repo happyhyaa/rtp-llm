@@ -102,7 +102,7 @@ public:
                                          TransferCopyAction               action,
                                          std::shared_ptr<CallbackBarrier> barrier = nullptr);
 
-    std::shared_ptr<AsyncContext> submit(const TransferDescriptor& descriptor) override;
+    std::shared_ptr<AsyncContext> submit(const std::vector<TransferDescriptor>& descriptors) override;
 
     size_t submitCount() const;
 
@@ -168,7 +168,7 @@ class ScriptedPerRankBlockTransferEngine: public PerRankBlockTransferEngine {
 public:
     explicit ScriptedPerRankBlockTransferEngine(const std::vector<GroupSetPtr>& groups);
 
-    std::shared_ptr<AsyncContext> submit(const TransferDescriptor& descriptor) override;
+    std::shared_ptr<AsyncContext> submit(const std::vector<TransferDescriptor>& descriptors) override;
 
     // Scripts the outcome of upcoming submits; an empty queue delegates to the real engine.
     void enqueue(bool success);

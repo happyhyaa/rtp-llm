@@ -27,7 +27,7 @@ BlockTreeCache::BlockTreeCache(std::unique_ptr<BlockTree>               tree,
     task_pool_(std::move(task_pool)),
     evictor_(
         tree_.get(),
-        [this](const TransferDescriptor& descriptor) { return executeTransfer(descriptor); },
+        [this](const TransferDescriptor& descriptor) { return executeTransfer({descriptor}); },
         transfer_dispatcher_.get(),
         task_pool_.get(),
         metrics_reporter_,
@@ -112,8 +112,14 @@ BlockTreeCache::~BlockTreeCache() {
     RTP_LLM_LOG_INFO("destroyed");
 }
 
-bool BlockTreeCache::executeTransfer(const TransferDescriptor& descriptor) {
-    return transfer_dispatcher_->executePerRank(descriptor);
+bool BlockTreeCache::executeTransfer(const std::vector<TransferDescriptor>& descriptors) {
+    auto context = transfer_dispatcher_->executePerRank(descriptors);
+    context->waitDone();
+    if (!context->success()) {
+        RTP_LLM_LOG_WARNING("per-rank block transfer failed: %s", context->errorInfo().ToString().c_str());
+        return false;
+    }
+    return true;
 }
 
 BlockTreeMatchResult BlockTreeCache::match(const CacheKeysType& cache_keys) {
