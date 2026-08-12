@@ -208,6 +208,14 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastManagerStoredCorrectly) {
     EXPECT_EQ(cache->transfer_dispatcher_->multi_rank_engine_->broadcast_manager_->workerNum(), 2u);
 }
 
+bool executeAndWait(MultiRankBlockTransferEngine&                 engine,
+                    const std::vector<TransferDescriptor>& descriptors,
+                    int                                    timeout_ms) {
+    auto context = engine.execute(descriptors, timeout_ms);
+    context->waitDone();
+    return context->success();
+}
+
 TEST_F(MultiRankBlockTransferEngineTest, BroadcastTransferSucceedsForAllWorkers) {
     const std::vector<MultiRankBlockTransferRpcConfig> configs = {
         {true, MemoryOperationResponsePB::OK, grpc::Status::OK},
@@ -218,8 +226,8 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastTransferSucceedsForAllWorkers)
     ASSERT_NE(broadcast_manager, nullptr);
     std::unique_ptr<BlockTreeCache> cache = makeBroadcastCache(broadcast_manager);
 
-    EXPECT_TRUE(
-        cache->transfer_dispatcher_->multi_rank_engine_->execute(makeBroadcastDescriptors(), /*timeout_ms=*/500));
+    EXPECT_TRUE(executeAndWait(
+        *cache->transfer_dispatcher_->multi_rank_engine_, makeBroadcastDescriptors(), /*timeout_ms=*/500));
 }
 
 TEST_F(MultiRankBlockTransferEngineTest, BroadcastTransferFailsWithoutDispatchOnInvalidBatch) {
@@ -232,12 +240,12 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastTransferFailsWithoutDispatchOn
     ASSERT_NE(broadcast_manager, nullptr);
     std::unique_ptr<BlockTreeCache> cache = makeBroadcastCache(broadcast_manager);
 
-    EXPECT_FALSE(cache->transfer_dispatcher_->multi_rank_engine_->execute({}, /*timeout_ms=*/500));
-    EXPECT_FALSE(
-        cache->transfer_dispatcher_->multi_rank_engine_->execute(makeBroadcastDescriptors(), /*timeout_ms=*/0));
+    EXPECT_FALSE(executeAndWait(*cache->transfer_dispatcher_->multi_rank_engine_, {}, /*timeout_ms=*/500));
+    EXPECT_FALSE(executeAndWait(
+        *cache->transfer_dispatcher_->multi_rank_engine_, makeBroadcastDescriptors(), /*timeout_ms=*/0));
 }
 
-TEST_F(MultiRankBlockTransferEngineTest, BroadcastTransferAbortsOnWorkerRpcError) {
+TEST_F(MultiRankBlockTransferEngineTest, BroadcastTransferReportsWorkerRpcError) {
     const std::vector<MultiRankBlockTransferRpcConfig> configs = {
         {true, MemoryOperationResponsePB::OK, grpc::Status::OK},
         {true, MemoryOperationResponsePB::OK, grpc::Status(grpc::StatusCode::INTERNAL, "worker failed")},
@@ -247,12 +255,11 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastTransferAbortsOnWorkerRpcError
     ASSERT_NE(broadcast_manager, nullptr);
     std::unique_ptr<BlockTreeCache> cache = makeBroadcastCache(broadcast_manager);
 
-    EXPECT_THROW(
-        cache->transfer_dispatcher_->multi_rank_engine_->execute(makeBroadcastDescriptors(), /*timeout_ms=*/500),
-        rtp_llm::RTPException);
+    EXPECT_FALSE(executeAndWait(
+        *cache->transfer_dispatcher_->multi_rank_engine_, makeBroadcastDescriptors(), /*timeout_ms=*/500));
 }
 
-TEST_F(MultiRankBlockTransferEngineTest, BroadcastTransferAbortsOnRpcDeadline) {
+TEST_F(MultiRankBlockTransferEngineTest, BroadcastTransferReportsRpcDeadline) {
     const std::vector<MultiRankBlockTransferRpcConfig> configs = {
         {true, MemoryOperationResponsePB::OK, grpc::Status::OK},
         {true, MemoryOperationResponsePB::OK, grpc::Status::OK, nullptr, /*sleep_millis=*/500},
@@ -262,9 +269,8 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastTransferAbortsOnRpcDeadline) {
     ASSERT_NE(broadcast_manager, nullptr);
     std::unique_ptr<BlockTreeCache> cache = makeBroadcastCache(broadcast_manager);
 
-    EXPECT_THROW(
-        cache->transfer_dispatcher_->multi_rank_engine_->execute(makeBroadcastDescriptors(), /*timeout_ms=*/50),
-        rtp_llm::RTPException);
+    EXPECT_FALSE(executeAndWait(
+        *cache->transfer_dispatcher_->multi_rank_engine_, makeBroadcastDescriptors(), /*timeout_ms=*/50));
 }
 
 TEST_F(MultiRankBlockTransferEngineTest, BroadcastTransferFailsOnWorkerBusinessError) {
@@ -277,8 +283,8 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastTransferFailsOnWorkerBusinessE
     ASSERT_NE(broadcast_manager, nullptr);
     std::unique_ptr<BlockTreeCache> cache = makeBroadcastCache(broadcast_manager);
 
-    EXPECT_FALSE(
-        cache->transfer_dispatcher_->multi_rank_engine_->execute(makeBroadcastDescriptors(), /*timeout_ms=*/500));
+    EXPECT_FALSE(executeAndWait(
+        *cache->transfer_dispatcher_->multi_rank_engine_, makeBroadcastDescriptors(), /*timeout_ms=*/500));
 }
 
 TEST_F(MultiRankBlockTransferEngineTest, BroadcastTransferFailsWhenAllWorkersReportBusinessError) {
@@ -291,8 +297,8 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastTransferFailsWhenAllWorkersRep
     ASSERT_NE(broadcast_manager, nullptr);
     std::unique_ptr<BlockTreeCache> cache = makeBroadcastCache(broadcast_manager);
 
-    EXPECT_FALSE(
-        cache->transfer_dispatcher_->multi_rank_engine_->execute(makeBroadcastDescriptors(), /*timeout_ms=*/500));
+    EXPECT_FALSE(executeAndWait(
+        *cache->transfer_dispatcher_->multi_rank_engine_, makeBroadcastDescriptors(), /*timeout_ms=*/500));
 }
 
 TEST_F(MultiRankBlockTransferEngineTest, BroadcastTransferWaitsForEveryRankBeforeReportingBusinessError) {
@@ -307,8 +313,8 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastTransferWaitsForEveryRankBefor
     std::unique_ptr<BlockTreeCache> cache = makeBroadcastCache(broadcast_manager);
 
     const auto start = std::chrono::steady_clock::now();
-    EXPECT_FALSE(
-        cache->transfer_dispatcher_->multi_rank_engine_->execute(makeBroadcastDescriptors(), /*timeout_ms=*/5000));
+    EXPECT_FALSE(executeAndWait(
+        *cache->transfer_dispatcher_->multi_rank_engine_, makeBroadcastDescriptors(), /*timeout_ms=*/5000));
     const auto elapsed_ms =
         std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
 
@@ -317,7 +323,7 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastTransferWaitsForEveryRankBefor
     EXPECT_EQ(state->requests.size(), 2u);
 }
 
-TEST_F(MultiRankBlockTransferEngineTest, BroadcastTransferAbortsOnMissingMemoryResponse) {
+TEST_F(MultiRankBlockTransferEngineTest, BroadcastTransferFailsOnMissingMemoryResponse) {
     const std::vector<MultiRankBlockTransferRpcConfig> configs = {
         {true, MemoryOperationResponsePB::OK, grpc::Status::OK},
         {false, MemoryOperationResponsePB::CODE_UNSPECIFIED, grpc::Status::OK},
@@ -327,12 +333,11 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastTransferAbortsOnMissingMemoryR
     ASSERT_NE(broadcast_manager, nullptr);
     std::unique_ptr<BlockTreeCache> cache = makeBroadcastCache(broadcast_manager);
 
-    EXPECT_THROW(
-        cache->transfer_dispatcher_->multi_rank_engine_->execute(makeBroadcastDescriptors(), /*timeout_ms=*/500),
-        rtp_llm::RTPException);
+    EXPECT_FALSE(executeAndWait(
+        *cache->transfer_dispatcher_->multi_rank_engine_, makeBroadcastDescriptors(), /*timeout_ms=*/500));
 }
 
-TEST_F(MultiRankBlockTransferEngineTest, BroadcastTransferAbortsOnUnfilledResponseCode) {
+TEST_F(MultiRankBlockTransferEngineTest, BroadcastTransferFailsOnUnfilledResponseCode) {
     const std::vector<MultiRankBlockTransferRpcConfig> configs = {
         {true, MemoryOperationResponsePB::OK, grpc::Status::OK},
         {true, MemoryOperationResponsePB::CODE_UNSPECIFIED, grpc::Status::OK},
@@ -342,12 +347,11 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastTransferAbortsOnUnfilledRespon
     ASSERT_NE(broadcast_manager, nullptr);
     std::unique_ptr<BlockTreeCache> cache = makeBroadcastCache(broadcast_manager);
 
-    EXPECT_THROW(
-        cache->transfer_dispatcher_->multi_rank_engine_->execute(makeBroadcastDescriptors(), /*timeout_ms=*/500),
-        rtp_llm::RTPException);
+    EXPECT_FALSE(executeAndWait(
+        *cache->transfer_dispatcher_->multi_rank_engine_, makeBroadcastDescriptors(), /*timeout_ms=*/500));
 }
 
-TEST_F(MultiRankBlockTransferEngineTest, BroadcastTransferAbortsOnUnknownResponseCode) {
+TEST_F(MultiRankBlockTransferEngineTest, BroadcastTransferFailsOnUnknownResponseCode) {
     const std::vector<MultiRankBlockTransferRpcConfig> configs = {
         {true, MemoryOperationResponsePB::OK, grpc::Status::OK},
         {true, static_cast<MemoryOperationResponsePB::Code>(42), grpc::Status::OK},
@@ -357,14 +361,13 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastTransferAbortsOnUnknownRespons
     ASSERT_NE(broadcast_manager, nullptr);
     std::unique_ptr<BlockTreeCache> cache = makeBroadcastCache(broadcast_manager);
 
-    EXPECT_THROW(
-        cache->transfer_dispatcher_->multi_rank_engine_->execute(makeBroadcastDescriptors(), /*timeout_ms=*/500),
-        rtp_llm::RTPException);
+    EXPECT_FALSE(executeAndWait(
+        *cache->transfer_dispatcher_->multi_rank_engine_, makeBroadcastDescriptors(), /*timeout_ms=*/500));
 }
 
 class MultiRankBlockTransferGrpcStatusTest: public ::testing::TestWithParam<grpc::StatusCode> {};
 
-TEST_P(MultiRankBlockTransferGrpcStatusTest, BroadcastTransferAbortsOnAnyNonOkStatus) {
+TEST_P(MultiRankBlockTransferGrpcStatusTest, BroadcastTransferReportsAnyNonOkStatus) {
     const std::vector<MultiRankBlockTransferRpcConfig> configs = {
         {true, MemoryOperationResponsePB::OK, grpc::Status::OK},
         {true, MemoryOperationResponsePB::OK, grpc::Status(GetParam(), "worker failed")},
@@ -374,9 +377,8 @@ TEST_P(MultiRankBlockTransferGrpcStatusTest, BroadcastTransferAbortsOnAnyNonOkSt
     ASSERT_NE(broadcast_manager, nullptr);
     std::unique_ptr<BlockTreeCache> cache = makeBroadcastCache(broadcast_manager);
 
-    EXPECT_THROW(
-        cache->transfer_dispatcher_->multi_rank_engine_->execute(makeBroadcastDescriptors(), /*timeout_ms=*/500),
-        rtp_llm::RTPException);
+    EXPECT_FALSE(executeAndWait(
+        *cache->transfer_dispatcher_->multi_rank_engine_, makeBroadcastDescriptors(), /*timeout_ms=*/500));
 }
 
 INSTANTIATE_TEST_SUITE_P(NonOkWorkerStatuses,
@@ -405,7 +407,8 @@ static void broadcastWithNonOkWorkerStatus() {
 
     disableCoreDump();
     StaticConfig::user_ft_core_dump_on_exception = true;
-    (void)cache->transfer_dispatcher_->multi_rank_engine_->execute(makeBroadcastDescriptors(), /*timeout_ms=*/500);
+    (void)executeAndWait(
+        *cache->transfer_dispatcher_->multi_rank_engine_, makeBroadcastDescriptors(), /*timeout_ms=*/500);
 }
 
 TEST_F(MultiRankBlockTransferEngineTest, BroadcastTransferAbortsWithSigabrtWhenCoreDumpEnabled) {

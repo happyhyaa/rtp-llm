@@ -267,9 +267,13 @@ BlockTreeEvictor::CopyResultSet EvictionTaskRunner::runTransfer(const BlockTreeE
     BlockTreeEvictor::CopyResultSet results;
     std::vector<TransferDescriptor> descriptors;
     const bool                      batch_ready      = buildTransferBatch(plan, descriptors);
-    const bool                      transfer_success = batch_ready
-                                  && transfer_dispatcher_->executeMultiRank(
-                                      descriptors, transferTimeoutMs(plan, memory_timeout_ms_, disk_timeout_ms_));
+    bool transfer_success = false;
+    if (batch_ready) {
+        auto context = transfer_dispatcher_->executeMultiRank(
+            descriptors, transferTimeoutMs(plan, memory_timeout_ms_, disk_timeout_ms_));
+        context->waitDone();
+        transfer_success = context->success();
+    }
     results.primary_success = transfer_success;
     results.cascade_success.assign(plan.cascade_descs.size(), transfer_success);
     return results;

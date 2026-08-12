@@ -56,7 +56,8 @@ ControlledPerRankBlockTransferEngine::ControlledPerRankBlockTransferEngine(const
                                                                            std::shared_ptr<CallbackBarrier> barrier):
     PerRankBlockTransferEngine(groups), action_(action), barrier_(std::move(barrier)) {}
 
-std::shared_ptr<AsyncContext> ControlledPerRankBlockTransferEngine::submit(const TransferDescriptor& descriptor) {
+std::shared_ptr<AsyncContext>
+ControlledPerRankBlockTransferEngine::submit(const std::vector<TransferDescriptor>& descriptors) {
     submit_count_.fetch_add(1);
     if (barrier_ != nullptr) {
         barrier_->enterAndWait();
@@ -68,7 +69,7 @@ std::shared_ptr<AsyncContext> ControlledPerRankBlockTransferEngine::submit(const
         return std::make_shared<CompletedAsyncContext>(
             ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "injected copy failure"));
     }
-    return PerRankBlockTransferEngine::submit(descriptor);
+    return PerRankBlockTransferEngine::submit(descriptors);
 }
 
 size_t ControlledPerRankBlockTransferEngine::submitCount() const {
@@ -586,18 +587,19 @@ ScriptedPerRankBlockTransferEngine::ScriptedPerRankBlockTransferEngine(const std
                                                                        bool perform_successful_transfers):
     PerRankBlockTransferEngine(groups), perform_successful_transfers_(perform_successful_transfers) {}
 
-std::shared_ptr<AsyncContext> ScriptedPerRankBlockTransferEngine::submit(const TransferDescriptor& descriptor) {
+std::shared_ptr<AsyncContext>
+ScriptedPerRankBlockTransferEngine::submit(const std::vector<TransferDescriptor>& descriptors) {
     bool success = true;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        descriptors_.push_back(descriptor);
+        descriptors_.insert(descriptors_.end(), descriptors.begin(), descriptors.end());
         if (!results_.empty()) {
             success = results_.front();
             results_.pop_front();
         }
     }
     if (success && perform_successful_transfers_) {
-        return PerRankBlockTransferEngine::submit(descriptor);
+        return PerRankBlockTransferEngine::submit(descriptors);
     }
     if (success) {
         return std::make_shared<CompletedAsyncContext>(ErrorInfo::OkStatus());
