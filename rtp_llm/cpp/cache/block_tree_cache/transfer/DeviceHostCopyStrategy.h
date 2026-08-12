@@ -13,8 +13,6 @@ namespace rtp_llm {
 
 struct StagedMemoryCopyScratch;
 
-// --- Copy Plan types ---
-
 struct DeviceHostCopyTile {
     void*  host_addr{nullptr};
     void*  device_addr{nullptr};
