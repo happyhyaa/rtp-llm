@@ -48,7 +48,7 @@ bool LoadTaskRunner::runTransfer(Task&                          task,
     bool       disk_transfer_started       = false;
     BlockTreeTransferBytes host_transfer_bytes;
     BlockTreeTransferBytes disk_transfer_bytes;
-    const auto finish_metrics              = [&](bool success) {
+    const auto finish_metrics = [&](bool host_success, bool disk_success) {
         if (host_transfer_started) {
             host_transfer_started = false;
             metrics_reporter.reportTransferFinished(CacheTransferOperation::LOAD,
@@ -56,7 +56,7 @@ bool LoadTaskRunner::runTransfer(Task&                          task,
                                                     Tier::DEVICE,
                                                     task.host_to_device_descriptors.size(),
                                                     host_transfer_begin_time_us,
-                                                    success,
+                                                    host_success,
                                                     host_transfer_bytes);
         }
         if (disk_transfer_started) {
@@ -66,7 +66,7 @@ bool LoadTaskRunner::runTransfer(Task&                          task,
                                                     Tier::DEVICE,
                                                     task.disk_to_device_descriptors.size(),
                                                     disk_transfer_begin_time_us,
-                                                    success,
+                                                    disk_success,
                                                     disk_transfer_bytes);
         }
     };
@@ -83,19 +83,29 @@ bool LoadTaskRunner::runTransfer(Task&                          task,
             disk_transfer_started = true;
         }
 
-        bool copy_success = transfer_dispatcher.executeMultiRank(task.host_to_device_descriptors, host_timeout_ms);
-        if (copy_success) {
+        const std::shared_ptr<AsyncContext> host_context =
+            transfer_dispatcher.executeMultiRank(task.host_to_device_descriptors, host_timeout_ms);
+        const std::shared_ptr<AsyncContext> disk_context =
+            transfer_dispatcher.executeMultiRank(task.disk_to_device_descriptors, disk_timeout_ms);
+        FusedAsyncContext fused_context({host_context, disk_context});
+        fused_context.waitDone();
+        const bool host_success = host_context->success();
+        const bool disk_success = disk_context->success();
+        if (host_success) {
             metrics_reporter.accumulateTransferBytes(task.host_to_device_descriptors, group_sets_, host_transfer_bytes);
-            copy_success = transfer_dispatcher.executeMultiRank(task.disk_to_device_descriptors, disk_timeout_ms);
-            if (copy_success) {
-                metrics_reporter.accumulateTransferBytes(
-                    task.disk_to_device_descriptors, group_sets_, disk_transfer_bytes);
-            }
         }
-        finish_metrics(copy_success);
+        if (disk_success) {
+            metrics_reporter.accumulateTransferBytes(
+                task.disk_to_device_descriptors, group_sets_, disk_transfer_bytes);
+        }
+        const bool copy_success = host_success && disk_success;
+        if (!copy_success) {
+            RTP_LLM_LOG_WARNING("load transfer batch failed: %s", fused_context.errorInfo().ToString().c_str());
+        }
+        finish_metrics(host_success, disk_success);
         return copy_success;
     } catch (...) {
-        finish_metrics(false);
+        finish_metrics(false, false);
         throw;
     }
 }
