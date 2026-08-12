@@ -168,11 +168,11 @@ public:
                                              size_t                          device_disk_staging_block_count = 4):
         PerRankBlockTransferEngine(groups, {}, device_disk_staging_block_count) {}
 
-    std::shared_ptr<AsyncContext> submit(const TransferDescriptor& descriptor) override {
+    std::shared_ptr<AsyncContext> submit(const std::vector<TransferDescriptor>& descriptors) override {
         bool scripted_success = true;
         {
             std::unique_lock<std::mutex> lock(mutex_);
-            descriptors_.push_back(descriptor);
+            descriptors_.insert(descriptors_.end(), descriptors.begin(), descriptors.end());
             if (!scripted_results_.empty()) {
                 scripted_success = scripted_results_.front();
                 scripted_results_.pop_front();
@@ -187,7 +187,7 @@ public:
             return std::make_shared<CompletedAsyncContext>(
                 ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "scripted transfer failure"));
         }
-        return PerRankBlockTransferEngine::submit(descriptor);
+        return PerRankBlockTransferEngine::submit(descriptors);
     }
 
     void enqueueResult(bool success) {
@@ -1591,13 +1591,11 @@ protected:
         const auto   stats_before_failure  = cache->getStats();
         const size_t staging_submits       = pausable_engine->submitCount();
 
-        // HOST descriptors execute before DISK descriptors. For the mixed case,
-        // let every HOST copy finish and fail the first DISK copy so settlement
-        // must roll back a genuinely successful leg.
+        // HOST batches execute before DISK batches. For the mixed case, let the
+        // HOST batch finish and fail the DISK batch so settlement must roll back
+        // a genuinely successful leg.
         if (failure_source == LoadFailureSource::MIXED) {
-            for (size_t index = 0; index < host_source_count; ++index) {
-                pausable_engine->enqueueResult(/*success=*/true);
-            }
+            pausable_engine->enqueueResult(/*success=*/true);
         }
         pausable_engine->enqueueResult(/*success=*/false);
         ASSERT_TRUE(pausable_engine->armPause());
@@ -1659,8 +1657,8 @@ protected:
         EXPECT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*cache), 0);
 
         const auto   descriptors_after_failure = pausable_engine->descriptors();
-        const size_t failure_submit_count      = descriptors_after_failure.size() - staging_submits;
-        EXPECT_EQ(failure_submit_count, failure_source == LoadFailureSource::MIXED ? host_source_count + 1 : 1u);
+        const size_t failure_descriptor_count = descriptors_after_failure.size() - staging_submits;
+        EXPECT_EQ(failure_descriptor_count, host_source_count + disk_source_count);
         if (failure_source == LoadFailureSource::MIXED) {
             for (size_t index = staging_submits; index < staging_submits + host_source_count; ++index) {
                 EXPECT_EQ(descriptors_after_failure[index].source_tier, Tier::HOST);

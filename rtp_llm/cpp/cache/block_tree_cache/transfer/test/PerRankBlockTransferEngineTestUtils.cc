@@ -255,6 +255,16 @@ DiskBlockIOStatus DirectAlignmentDiskBlockIO::write(uint64_t offset, const void*
 }
 
 DiskBlockIOStatus DirectAlignmentDiskBlockIO::read(const std::vector<DiskRead>& reads) {
+    size_t batch_index = 0;
+    {
+        std::lock_guard<std::mutex> lock(read_batch_mutex_);
+        read_batch_sizes_.push_back(reads.size());
+        batch_index = read_batch_sizes_.size();
+    }
+    read_batch_cv_.notify_all();
+    if (batch_index == fail_read_batch_) {
+        return DiskBlockIOStatus::IO_ERROR;
+    }
     for (const DiskRead& item : reads) {
         const DiskBlockIOStatus status = read(item.offset, item.buffer, item.bytes);
         if (status != DiskBlockIOStatus::OK) {
@@ -292,6 +302,21 @@ bool DirectAlignmentDiskBlockIO::bufferedIo() const {
     return buffered_io_;
 }
 
+std::vector<size_t> DirectAlignmentDiskBlockIO::readBatchSizes() const {
+    std::lock_guard<std::mutex> lock(read_batch_mutex_);
+    return read_batch_sizes_;
+}
+
+bool DirectAlignmentDiskBlockIO::waitForReadBatchCount(size_t count, std::chrono::milliseconds timeout) const {
+    std::unique_lock<std::mutex> lock(read_batch_mutex_);
+    return read_batch_cv_.wait_for(lock, timeout, [this, count] { return read_batch_sizes_.size() >= count; });
+}
+
+void DirectAlignmentDiskBlockIO::failReadBatch(size_t one_based_batch_index) {
+    std::lock_guard<std::mutex> lock(read_batch_mutex_);
+    fail_read_batch_ = one_based_batch_index;
+}
+
 bool DirectAlignmentDiskBlockIO::aligned(uint64_t offset, const void* buffer, size_t bytes) {
     const auto addr = reinterpret_cast<uintptr_t>(buffer);
     return offset % kAlignment == 0 && addr % kAlignment == 0 && bytes % kAlignment == 0;
@@ -327,7 +352,7 @@ TransferDescriptor makeDescriptor(Tier                             source_tier,
 }
 
 bool submitSucceeded(const std::shared_ptr<PerRankBlockTransferEngine>& engine, const TransferDescriptor& desc) {
-    auto context = engine->submit(desc);
+    auto context = engine->submit({desc});
     context->waitDone();
     return context->success();
 }
@@ -335,9 +360,8 @@ bool submitSucceeded(const std::shared_ptr<PerRankBlockTransferEngine>& engine, 
 void expectStatus(const std::shared_ptr<PerRankBlockTransferEngine>& engine,
                   const TransferDescriptor&                          desc,
                   TransferStatus                                     expected) {
-    auto context = engine->submit(desc);
+    auto context = engine->submit({desc});
     ASSERT_NE(context, nullptr);
-    EXPECT_TRUE(context->done());
     context->waitDone();
     EXPECT_EQ(context->success(), expected == TransferStatus::OK);
 

@@ -39,8 +39,8 @@ public:
     explicit CountingSingleTypePerRankBlockTransferEngine(const std::vector<GroupSetPtr>& groups):
         PerRankBlockTransferEngine(groups) {}
 
-    std::shared_ptr<AsyncContext> submit(const TransferDescriptor&) override {
-        ++submit_count_;
+    std::shared_ptr<AsyncContext> submit(const std::vector<TransferDescriptor>& descriptors) override {
+        submit_count_ += descriptors.size();
         return std::make_shared<CompletedAsyncContext>(ErrorInfo::OkStatus());
     }
 
