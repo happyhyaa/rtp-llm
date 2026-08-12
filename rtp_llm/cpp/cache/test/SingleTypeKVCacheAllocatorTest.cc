@@ -118,7 +118,8 @@ BlockIdxType seedSingleTypeLowerTier(BlockTreeCache& cache, Tier source_tier, Ca
     } else {
         resources[0][0].disk_slot = source_block;
     }
-    const BlockTreeInsertResult insert_result = cache.tree()->insertNode(CacheKeysType{key}, resources);
+    const BlockTreeInsertResult insert_result =
+        cache.tree()->insertNode(CacheKeysType{key}, resources, /*collect_path=*/false);
     EXPECT_EQ(insert_result.inserted_nodes.size(), 1u);
     group->releaseSingleBlock(source_tier, source_block, BlockRefType::BLOCK_CACHE);
     return source_block;
@@ -887,6 +888,14 @@ TEST_F(SingleTypeKVCacheAllocatorTest, SuccessfulOuterAllocationCommitsLoadExact
     const auto result    = allocator_->malloc(MallocInfo{resource, token_ids});
     ASSERT_TRUE(result.success);
     ASSERT_NE(result.async_context, nullptr);
+    EXPECT_EQ(result.reuse_len, 0);
+    EXPECT_EQ(result.host_reuse_len, 0);
+    EXPECT_EQ(result.disk_reuse_len, 0);
+    EXPECT_EQ(resource->cacheResource(0).deviceReuseBlockNum(), 0u);
+    const auto load_context = std::dynamic_pointer_cast<LoadAsyncContext>(result.async_context);
+    ASSERT_NE(load_context, nullptr);
+    EXPECT_EQ(load_context->matchedBlocks(), 1u);
+    EXPECT_EQ(load_context->matchedBlocks(Tier::HOST), 1u);
     EXPECT_EQ(commit_count, 1u);
     result.async_context->waitDone();
     EXPECT_TRUE(result.async_context->success()) << result.async_context->errorInfo().ToString();
