@@ -226,9 +226,13 @@ PerRankBlockTransferEngine::submit(const std::vector<TransferDescriptor>& descri
         }
     }
 
-    if (source == Tier::DEVICE && target == Tier::DISK) {
-        return std::make_shared<CompletedAsyncContext>(
-            ErrorInfo(ErrorCode::INVALID_PARAMS, "unsupported transfer direction: DEVICE->DISK"));
+    if ((source == Tier::HOST || target == Tier::HOST)
+        && (source == Tier::DISK || target == Tier::DISK)) {
+        const auto* disk_pool = group_sets.front()->diskPool().get();
+        if (std::any_of(group_sets.begin(), group_sets.end(),
+                        [disk_pool](const GroupSet* group_set) { return group_set->diskPool().get() != disk_pool; })) {
+            return std::make_shared<CompletedAsyncContext>(transferStatusToErrorInfo(TransferStatus::INVALID_ARGS));
+        }
     }
 
     auto [reservation_error, reservation] = endpoint_registry_->reserve(descriptors, group_sets);
@@ -239,6 +243,14 @@ PerRankBlockTransferEngine::submit(const std::vector<TransferDescriptor>& descri
 
     if (source == Tier::DISK && target == Tier::DEVICE) {
         return device_disk_executor_->execute(descriptors, group_sets, std::move(reservation));
+    }
+
+    if (source == Tier::DEVICE && target == Tier::DISK) {
+        if (descriptors.size() != 1) {
+            return std::make_shared<CompletedAsyncContext>(transferStatusToErrorInfo(TransferStatus::INVALID_ARGS));
+        }
+        return std::make_shared<CompletedAsyncContext>(
+            transferStatusToErrorInfo(device_disk_executor_->execute(descriptors.front(), *group_sets.front())));
     }
 
     BlockTreeTaskPool* task_pool = taskPoolForDirection(source, target);

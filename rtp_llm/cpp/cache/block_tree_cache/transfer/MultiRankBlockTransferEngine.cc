@@ -6,7 +6,9 @@
 #include <utility>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferRequestConverter.h"
+#include "rtp_llm/cpp/config/StaticConfig.h"
 #include "rtp_llm/cpp/model_rpc/BroadcastManager.h"
+#include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
@@ -46,6 +48,9 @@ public:
             return;
         }
         if (!result_->success()) {
+            if (StaticConfig::user_ft_core_dump_on_exception) {
+                RTP_LLM_FAIL("multi-rank transfer aborted, at least one worker RPC status is not OK");
+            }
             error_ = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "multi-rank transfer RPC failed");
             evaluated_ = true;
             return;

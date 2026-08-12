@@ -72,7 +72,7 @@ ControlledPerRankBlockTransferEngine::submit(const std::vector<TransferDescripto
     return PerRankBlockTransferEngine::submit(descriptors);
 }
 
-size_t ControlledPerRankBlockTransferEngine::submitCount() const {
+size_t ControlledPerRankBlockTransferEngine::submittedBatchCount() const {
     return submit_count_.load();
 }
 
@@ -592,6 +592,7 @@ ScriptedPerRankBlockTransferEngine::submit(const std::vector<TransferDescriptor>
     bool success = true;
     {
         std::lock_guard<std::mutex> lock(mutex_);
+        ++submitted_batch_count_;
         descriptors_.insert(descriptors_.end(), descriptors.begin(), descriptors.end());
         if (!results_.empty()) {
             success = results_.front();
@@ -617,6 +618,7 @@ void ScriptedPerRankBlockTransferEngine::clear() {
     std::lock_guard<std::mutex> lock(mutex_);
     results_.clear();
     descriptors_.clear();
+    submitted_batch_count_ = 0;
 }
 
 std::vector<TransferDescriptor> ScriptedPerRankBlockTransferEngine::descriptors() const {
@@ -624,7 +626,12 @@ std::vector<TransferDescriptor> ScriptedPerRankBlockTransferEngine::descriptors(
     return descriptors_;
 }
 
-size_t ScriptedPerRankBlockTransferEngine::submitCount() const {
+size_t ScriptedPerRankBlockTransferEngine::submittedBatchCount() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return submitted_batch_count_;
+}
+
+size_t ScriptedPerRankBlockTransferEngine::submittedDescriptorCount() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return descriptors_.size();
 }

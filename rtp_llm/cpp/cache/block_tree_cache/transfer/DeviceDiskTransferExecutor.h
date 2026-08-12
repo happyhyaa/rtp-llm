@@ -36,6 +36,8 @@ public:
                                           const std::vector<const GroupSet*>&    group_sets,
                                           std::shared_ptr<void>                  completion_guard = nullptr);
 
+    TransferStatus execute(const TransferDescriptor& descriptor, const GroupSet& group_set);
+
 private:
     enum class PoolState {
         FREE,

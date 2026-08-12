@@ -211,6 +211,33 @@ public:
     }
 };
 
+class BlockingStrategy: public DeviceHostCopyStrategy {
+public:
+    StrategyResult tryExecute(const DeviceHostCopyPlan&, const DeviceHostCopyOptions&) override {
+        std::unique_lock<std::mutex> lock(mutex_);
+        entered_ = true;
+        cv_.notify_all();
+        cv_.wait(lock, [this] { return released_; });
+        return StrategyResult::done();
+    }
+
+    bool waitUntilEntered(std::chrono::milliseconds timeout) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        return cv_.wait_for(lock, timeout, [this] { return entered_; });
+    }
+    void release() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        released_ = true;
+        cv_.notify_all();
+    }
+
+private:
+    std::mutex              mutex_;
+    std::condition_variable cv_;
+    bool                    entered_{false};
+    bool                    released_{false};
+};
+
 static void installStrategyRecorders(DeviceHostTransferExecutor& executor, std::array<StrategyCounters, 3>& counters) {
     RTP_LLM_CHECK(executor.strategies_.size() == counters.size());
     for (size_t i = 0; i < counters.size(); ++i) {
@@ -748,28 +775,113 @@ private:
     std::thread*         thread_;
 };
 
-TEST(PerRankBlockTransferEngineIntegrationTest, DeviceToDiskReturnsUnsupported) {
+TEST(PerRankBlockTransferEngineIntegrationTest, DeviceDiskDirectRoundTripWithoutHostPool) {
     ASSERT_TRUE(torch::cuda::is_available()) << "CUDA not available, cannot run GPU tests";
-    TempDirGuard     temp_dir("per_rank_device_to_disk_unsupported");
+    TempDirGuard     temp_dir("per_rank_direct_round_trip");
     constexpr size_t payload_bytes = 80;
     auto             owned_io      = std::make_unique<DirectAlignmentDiskBlockIO>();
     auto*            direct_io     = owned_io.get();
-    auto disk_pool    = makeDiskPool(payload_bytes, 2, temp_dir.path, std::move(owned_io), "device_to_disk", false);
-    auto device_pool  = makeDevicePool({{64, 16}}, 2, "per_rank_device_to_disk_unsupported");
+    auto disk_pool    = makeDiskPool(payload_bytes, 2, temp_dir.path, std::move(owned_io), "device_disk_direct", false);
+    auto device_pool  = makeDevicePool({{64, 16}}, 2, "per_rank_direct_round_trip_device");
     auto device_block = poolMalloc(*device_pool);
     auto disk_block   = poolMalloc(*disk_pool);
     ASSERT_NE(device_block, NULL_BLOCK_IDX);
     ASSERT_NE(disk_block, NULL_BLOCK_IDX);
 
     auto group = makeDeviceHostGroup(0, {device_pool}, nullptr, {makeGroupBase({0}, 64, 16)}, disk_pool);
+    ASSERT_EQ(group->hostPool(), nullptr);
     auto engine = makeEngine({group});
-    auto context = engine->submit(
-        {makeDescriptor(Tier::DEVICE, Tier::DISK, {device_block}, NULL_BLOCK_IDX, disk_block, 0)});
+
+    fillDeviceLayer(device_pool, 0, device_block, {0x6A, 0xD3});
+    const auto expected = readDeviceLayer(device_pool, 0, device_block);
+
+    expectStatus(engine,
+                 makeDescriptor(Tier::DEVICE, Tier::DISK, {device_block}, NULL_BLOCK_IDX, disk_block, 0),
+                 TransferStatus::OK);
+    EXPECT_FALSE(direct_io->bufferedIo());
+    EXPECT_EQ(direct_io->lastWriteBytes(), disk_pool->strideBytes());
+    fillDeviceLayer(device_pool, 0, device_block, {0x00, 0x00});
+    expectStatus(engine,
+                 makeDescriptor(Tier::DISK, Tier::DEVICE, {device_block}, NULL_BLOCK_IDX, disk_block, 0),
+                 TransferStatus::OK);
+    EXPECT_EQ(readDeviceLayer(device_pool, 0, device_block), expected);
+    EXPECT_EQ(direct_io->lastReadBytes(), disk_pool->strideBytes());
+}
+
+TEST(PerRankBlockTransferEngineIntegrationTest, DeviceToDiskRejectsMultipleDescriptors) {
+    ASSERT_TRUE(torch::cuda::is_available()) << "CUDA not available, cannot run GPU tests";
+    TempDirGuard     temp_dir("per_rank_device_to_disk_batch");
+    constexpr size_t payload_bytes = 80;
+    auto             owned_io      = std::make_unique<DirectAlignmentDiskBlockIO>();
+    auto*            direct_io     = owned_io.get();
+    auto disk_pool = makeDiskPool(payload_bytes, 2, temp_dir.path, std::move(owned_io), "device_to_disk_batch", false);
+    auto device_pool = makeDevicePool({{64, 16}}, 2, "per_rank_device_to_disk_batch");
+    auto group = makeDeviceHostGroup(0, {device_pool}, nullptr, {makeGroupBase({0}, 64, 16)}, disk_pool);
+    auto engine = makeEngine({group});
+
+    std::vector<TransferDescriptor> descriptors;
+    for (size_t index = 0; index < 2; ++index) {
+        descriptors.push_back(makeDescriptor(Tier::DEVICE,
+                                             Tier::DISK,
+                                             {poolMalloc(*device_pool)},
+                                             NULL_BLOCK_IDX,
+                                             poolMalloc(*disk_pool),
+                                             0));
+    }
+    auto context = engine->submit(descriptors);
     ASSERT_NE(context, nullptr);
     context->waitDone();
     EXPECT_FALSE(context->success());
     EXPECT_EQ(context->errorInfo().code(), ErrorCode::INVALID_PARAMS);
     EXPECT_EQ(direct_io->lastWriteBytes(), 0u);
+}
+
+TEST(PerRankBlockTransferEngineIntegrationTest, DeviceToDiskFailureReleasesStaging) {
+    ASSERT_TRUE(torch::cuda::is_available()) << "CUDA not available, cannot run GPU tests";
+    TempDirGuard     temp_dir("per_rank_device_to_disk_failure");
+    constexpr size_t payload_bytes = 80;
+    auto             failing_io    = std::make_unique<StatusDiskBlockIO>(DiskBlockIOStatus::IO_ERROR);
+    auto*            status_io     = failing_io.get();
+    auto disk_pool  = makeDiskPool(payload_bytes, 1, temp_dir.path, std::move(failing_io));
+    auto device_pool = makeDevicePool({{64, 16}}, 1, "per_rank_device_to_disk_failure");
+    auto descriptor = makeDescriptor(Tier::DEVICE,
+                                     Tier::DISK,
+                                     {poolMalloc(*device_pool)},
+                                     NULL_BLOCK_IDX,
+                                     poolMalloc(*disk_pool),
+                                     0);
+    auto group = makeDeviceHostGroup(0, {device_pool}, nullptr, {makeGroupBase({0}, 64, 16)}, disk_pool);
+    auto engine = makeEngine({group});
+
+    expectStatus(engine, descriptor, TransferStatus::DISK_IO_ERROR);
+    status_io->setStatus(DiskBlockIOStatus::OK);
+    expectStatus(engine, descriptor, TransferStatus::OK);
+}
+
+TEST(PerRankBlockTransferEngineIntegrationTest, DiskToDeviceReturnsPendingContext) {
+    ASSERT_TRUE(torch::cuda::is_available()) << "CUDA not available, cannot run GPU tests";
+    TempDirGuard     temp_dir("per_rank_disk_to_device_async");
+    constexpr size_t payload_bytes = 80;
+    auto             blocking_io   = std::make_unique<BlockingDiskBlockIO>(BlockingDiskBlockIO::BlockOn::READ);
+    auto*            io            = blocking_io.get();
+    auto disk_pool  = makeDiskPool(payload_bytes, 1, temp_dir.path, std::move(blocking_io));
+    auto device_pool = makeDevicePool({{64, 16}}, 1, "per_rank_disk_to_device_async");
+    auto device_block = poolMalloc(*device_pool);
+    auto disk_block   = poolMalloc(*disk_pool);
+    auto group = makeDeviceHostGroup(0, {device_pool}, nullptr, {makeGroupBase({0}, 64, 16)}, disk_pool);
+    auto engine = makeEngine({group});
+    [[maybe_unused]] auto release_guard = std::shared_ptr<void>(nullptr, [io](void*) { io->release(); });
+    std::vector<uint8_t> disk_data(disk_pool->strideBytes(), 0x5A);
+    ASSERT_EQ(disk_pool->write(disk_block, disk_data.data(), disk_data.size()), BlockIOStatus::OK);
+
+    auto context = engine->submit(
+        {makeDescriptor(Tier::DISK, Tier::DEVICE, {device_block}, NULL_BLOCK_IDX, disk_block, 0)});
+    ASSERT_NE(context, nullptr);
+    ASSERT_TRUE(io->waitUntilBlocked(std::chrono::seconds(5)));
+    EXPECT_FALSE(context->done());
+    io->release();
+    context->waitDone();
+    EXPECT_TRUE(context->success());
 }
 
 TEST(PerRankBlockTransferEngineIntegrationTest, DiskDeviceStageFailureShortCircuitsAndReleasesStaging) {
@@ -799,6 +911,73 @@ TEST(PerRankBlockTransferEngineIntegrationTest, DiskDeviceStageFailureShortCircu
     expectStatus(engine,
                  makeDescriptor(Tier::DISK, Tier::DEVICE, {device_block}, NULL_BLOCK_IDX, disk_block, 0),
                  TransferStatus::OK);
+}
+
+TEST(PerRankBlockTransferEngineIntegrationTest, DiskDeviceStageTwoFailureReleasesStaging) {
+    ASSERT_TRUE(torch::cuda::is_available()) << "CUDA not available, cannot run GPU tests";
+    TempDirGuard temp_dir("per_rank_stage_two_failure");
+    constexpr size_t payload_bytes = 80;
+    auto disk_pool = makeDiskPool(payload_bytes, 2, temp_dir.path,
+                                  std::make_unique<StatusDiskBlockIO>(DiskBlockIOStatus::OK));
+    auto device_pool = makeDevicePool({{64, 16}}, 2, "per_rank_stage_two_failure_device");
+    const auto device_block = poolMalloc(*device_pool);
+    const auto disk_block = poolMalloc(*disk_pool);
+    auto group = makeDeviceHostGroup(0, {device_pool}, nullptr, {makeGroupBase({0}, 64, 16)}, disk_pool);
+    auto engine = makeEngine({group});
+    auto& strategies = engine->device_host_executor_->strategies_;
+    strategies.clear();
+    strategies.push_back(std::make_unique<FailingStrategy>());
+    const auto descriptor =
+        makeDescriptor(Tier::DISK, Tier::DEVICE, {device_block}, NULL_BLOCK_IDX, disk_block, 0);
+
+    auto failed = engine->submit({descriptor});
+    failed->waitDone();
+    EXPECT_FALSE(failed->success());
+
+    strategies.clear();
+    strategies.push_back(std::make_unique<GenericMultiCopyDeviceHostCopyStrategy>());
+    auto retry = engine->submit({descriptor});
+    retry->waitDone();
+    EXPECT_TRUE(retry->success());
+}
+
+TEST(PerRankBlockTransferEngineIntegrationTest, DiskDeviceReportsTimeoutWhenBothStagingPoolsAreBusy) {
+    ASSERT_TRUE(torch::cuda::is_available()) << "CUDA not available, cannot run GPU tests";
+    TempDirGuard temp_dir("per_rank_staging_timeout");
+    constexpr size_t payload_bytes = 80;
+    auto disk_pool = makeDiskPool(payload_bytes, 3, temp_dir.path,
+                                  std::make_unique<StatusDiskBlockIO>(DiskBlockIOStatus::OK));
+    auto device_pool = makeDevicePool({{64, 16}}, 3, "per_rank_staging_timeout_device");
+    auto group = makeDeviceHostGroup(0, {device_pool}, nullptr, {makeGroupBase({0}, 64, 16)}, disk_pool);
+    auto engine = std::make_shared<PerRankBlockTransferEngine>(
+        std::vector<GroupSetPtr>{group}, DeviceHostCopyOptions{}, /*device_disk_staging_block_count=*/2);
+    auto blocking_strategy = std::make_unique<BlockingStrategy>();
+    auto* blocker = blocking_strategy.get();
+    engine->device_host_executor_->strategies_.clear();
+    engine->device_host_executor_->strategies_.push_back(std::move(blocking_strategy));
+    std::vector<TransferDescriptor> descriptors;
+    for (size_t index = 0; index < 3; ++index) {
+        descriptors.push_back(makeDescriptor(Tier::DISK,
+                                             Tier::DEVICE,
+                                             {poolMalloc(*device_pool)},
+                                             NULL_BLOCK_IDX,
+                                             poolMalloc(*disk_pool),
+                                             0));
+    }
+
+    auto first = engine->submit({descriptors[0]});
+    ASSERT_TRUE(blocker->waitUntilEntered(std::chrono::seconds(5)));
+    auto second = engine->submit({descriptors[1]});
+    auto third = engine->submit({descriptors[2]});
+    third->waitDone();
+
+    EXPECT_FALSE(third->success());
+    EXPECT_EQ(third->errorInfo().code(), ErrorCode::DEADLINE_EXCEEDED);
+    blocker->release();
+    first->waitDone();
+    second->waitDone();
+    EXPECT_TRUE(first->success());
+    EXPECT_TRUE(second->success());
 }
 
 TEST(PerRankBlockTransferEngineIntegrationTest, DiskDeviceStagingTransientExhaustionWaitsAndDeliversPayload) {

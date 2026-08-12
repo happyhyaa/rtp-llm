@@ -104,7 +104,7 @@ public:
 
     std::shared_ptr<AsyncContext> submit(const std::vector<TransferDescriptor>& descriptors) override;
 
-    size_t submitCount() const;
+    size_t submittedBatchCount() const;
 
 private:
     const TransferCopyAction         action_;
@@ -178,12 +178,14 @@ public:
     void clear();
 
     std::vector<TransferDescriptor> descriptors() const;
-    size_t                          submitCount() const;
+    size_t                          submittedBatchCount() const;
+    size_t                          submittedDescriptorCount() const;
 
 private:
     mutable std::mutex              mutex_;
     std::deque<bool>                results_;
     std::vector<TransferDescriptor> descriptors_;
+    size_t                          submitted_batch_count_{0};
     bool                            perform_successful_transfers_{true};
 };
 

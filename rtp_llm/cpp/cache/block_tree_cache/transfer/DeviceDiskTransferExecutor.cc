@@ -178,6 +178,27 @@ DeviceDiskTransferExecutor::execute(const std::vector<TransferDescriptor>& descr
     return context;
 }
 
+TransferStatus DeviceDiskTransferExecutor::execute(const TransferDescriptor& descriptor,
+                                                   const GroupSet&           group_set) {
+    const auto pool_index = acquirePool(kStagingAcquireTimeout);
+    if (!pool_index.has_value()) {
+        return TransferStatus::RESOURCE_EXHAUSTED;
+    }
+    auto pool_guard = std::shared_ptr<void>(nullptr, [this, pool_index](void*) { releasePool(*pool_index); });
+    auto lease      = staging_pools_[*pool_index]->malloc();
+    RTP_LLM_CHECK(lease.has_value());
+
+    const HostBufferView                 host = lease->blockBuffer(group_set.payloadBytes());
+    const std::vector<HostBufferView>    hosts{host};
+    const std::vector<TransferDescriptor> descriptors{descriptor};
+    const std::vector<const GroupSet*>    group_sets{&group_set};
+    const TransferStatus stage_one = device_host_executor_.execute(hosts, descriptors, group_sets);
+    if (stage_one != TransferStatus::OK) {
+        return stage_one;
+    }
+    return host_disk_executor_.execute(hosts, descriptors, group_sets);
+}
+
 void DeviceDiskTransferExecutor::drainStageOne() {
     while (true) {
         {

@@ -230,6 +230,23 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastTransferSucceedsForAllWorkers)
         *cache->transfer_dispatcher_->multi_rank_engine_, makeBroadcastDescriptors(), /*timeout_ms=*/500));
 }
 
+TEST_F(MultiRankBlockTransferEngineTest, ExecuteReturnsBeforeSlowWorkersFinish) {
+    const std::vector<MultiRankBlockTransferRpcConfig> configs = {
+        {true, MemoryOperationResponsePB::OK, grpc::Status::OK, nullptr, /*sleep_millis=*/300},
+    };
+    std::vector<std::unique_ptr<MultiRankBlockTransferRpcServer>> servers;
+    auto broadcast_manager = makeBroadcastManager(configs, servers);
+    ASSERT_NE(broadcast_manager, nullptr);
+    auto cache = makeBroadcastCache(broadcast_manager);
+
+    auto context = cache->transfer_dispatcher_->multi_rank_engine_->execute(
+        makeBroadcastDescriptors(), /*timeout_ms=*/1000);
+
+    EXPECT_FALSE(context->done());
+    context->waitDone();
+    EXPECT_TRUE(context->success());
+}
+
 TEST_F(MultiRankBlockTransferEngineTest, BroadcastTransferFailsWithoutDispatchOnInvalidBatch) {
     const std::vector<MultiRankBlockTransferRpcConfig> configs = {
         {true, MemoryOperationResponsePB::OK, grpc::Status::OK},
@@ -323,10 +340,19 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastTransferWaitsForEveryRankBefor
     EXPECT_EQ(state->requests.size(), 2u);
 }
 
-TEST_F(MultiRankBlockTransferEngineTest, BroadcastTransferFailsOnMissingMemoryResponse) {
+struct InvalidWorkerResponse {
+    bool                            has_response;
+    MemoryOperationResponsePB::Code code;
+};
+
+class MultiRankBlockTransferInvalidResponseTest:
+    public ::testing::TestWithParam<InvalidWorkerResponse> {};
+
+TEST_P(MultiRankBlockTransferInvalidResponseTest, BroadcastTransferRejectsInvalidWorkerResponse) {
+    const auto param = GetParam();
     const std::vector<MultiRankBlockTransferRpcConfig> configs = {
         {true, MemoryOperationResponsePB::OK, grpc::Status::OK},
-        {false, MemoryOperationResponsePB::CODE_UNSPECIFIED, grpc::Status::OK},
+        {param.has_response, param.code, grpc::Status::OK},
     };
     std::vector<std::unique_ptr<MultiRankBlockTransferRpcServer>> servers;
     std::shared_ptr<BroadcastManager> broadcast_manager = makeBroadcastManager(configs, servers);
@@ -337,33 +363,12 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastTransferFailsOnMissingMemoryRe
         *cache->transfer_dispatcher_->multi_rank_engine_, makeBroadcastDescriptors(), /*timeout_ms=*/500));
 }
 
-TEST_F(MultiRankBlockTransferEngineTest, BroadcastTransferFailsOnUnfilledResponseCode) {
-    const std::vector<MultiRankBlockTransferRpcConfig> configs = {
-        {true, MemoryOperationResponsePB::OK, grpc::Status::OK},
-        {true, MemoryOperationResponsePB::CODE_UNSPECIFIED, grpc::Status::OK},
-    };
-    std::vector<std::unique_ptr<MultiRankBlockTransferRpcServer>> servers;
-    std::shared_ptr<BroadcastManager> broadcast_manager = makeBroadcastManager(configs, servers);
-    ASSERT_NE(broadcast_manager, nullptr);
-    std::unique_ptr<BlockTreeCache> cache = makeBroadcastCache(broadcast_manager);
-
-    EXPECT_FALSE(executeAndWait(
-        *cache->transfer_dispatcher_->multi_rank_engine_, makeBroadcastDescriptors(), /*timeout_ms=*/500));
-}
-
-TEST_F(MultiRankBlockTransferEngineTest, BroadcastTransferFailsOnUnknownResponseCode) {
-    const std::vector<MultiRankBlockTransferRpcConfig> configs = {
-        {true, MemoryOperationResponsePB::OK, grpc::Status::OK},
-        {true, static_cast<MemoryOperationResponsePB::Code>(42), grpc::Status::OK},
-    };
-    std::vector<std::unique_ptr<MultiRankBlockTransferRpcServer>> servers;
-    std::shared_ptr<BroadcastManager> broadcast_manager = makeBroadcastManager(configs, servers);
-    ASSERT_NE(broadcast_manager, nullptr);
-    std::unique_ptr<BlockTreeCache> cache = makeBroadcastCache(broadcast_manager);
-
-    EXPECT_FALSE(executeAndWait(
-        *cache->transfer_dispatcher_->multi_rank_engine_, makeBroadcastDescriptors(), /*timeout_ms=*/500));
-}
+INSTANTIATE_TEST_SUITE_P(
+    InvalidWorkerResponses,
+    MultiRankBlockTransferInvalidResponseTest,
+    ::testing::Values(InvalidWorkerResponse{false, MemoryOperationResponsePB::CODE_UNSPECIFIED},
+                      InvalidWorkerResponse{true, MemoryOperationResponsePB::CODE_UNSPECIFIED},
+                      InvalidWorkerResponse{true, static_cast<MemoryOperationResponsePB::Code>(42)}));
 
 class MultiRankBlockTransferGrpcStatusTest: public ::testing::TestWithParam<grpc::StatusCode> {};
 

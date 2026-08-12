@@ -433,7 +433,7 @@ TEST_F(BlockTreeCacheIntegrationTest, HostDiskOnlyLifecycle) {
     std::shared_ptr<LoadAsyncContext> disk_context = takeLoadContext(disk_match);
     ASSERT_NE(disk_context, nullptr);
     disk_context.reset();
-    EXPECT_EQ(scripted_copy->submitCount(), 1u);
+    EXPECT_EQ(scripted_copy->submittedDescriptorCount(), 1u);
 
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::HOST, 0.0);
     cache.reset();
@@ -474,7 +474,7 @@ TEST_F(BlockTreeCacheIntegrationTest, OneShotCascadeFailureRollsBackSWAAndRetrie
     EXPECT_EQ(first_descriptors[1].source_tier, Tier::DEVICE);
     EXPECT_EQ(first_descriptors[1].target_tier, Tier::HOST);
     EXPECT_EQ(first_descriptors[1].source_blocks, (std::vector<BlockIdxType>{swa_source}));
-    EXPECT_EQ(environment->scripted_per_rank_transfer_engine->submitCount(), 2u);
+    EXPECT_EQ(environment->scripted_per_rank_transfer_engine->submittedDescriptorCount(), 2u);
 
     const std::vector<GroupSetResource> after_failure = environment->resourcesForPathNode(0);
     ASSERT_EQ(after_failure.size(), 2u);
@@ -503,7 +503,7 @@ TEST_F(BlockTreeCacheIntegrationTest, OneShotCascadeFailureRollsBackSWAAndRetrie
     EXPECT_EQ(retry_descriptors[0].source_tier, Tier::DEVICE);
     EXPECT_EQ(retry_descriptors[0].target_tier, Tier::HOST);
     EXPECT_EQ(retry_descriptors[0].source_blocks, (std::vector<BlockIdxType>{swa_source}));
-    EXPECT_EQ(environment->scripted_per_rank_transfer_engine->submitCount(), 1u);
+    EXPECT_EQ(environment->scripted_per_rank_transfer_engine->submittedDescriptorCount(), 1u);
 
     const std::vector<GroupSetResource> after_retry = environment->resourcesForPathNode(0);
     ASSERT_EQ(after_retry.size(), 2u);
@@ -856,7 +856,7 @@ TEST_F(BlockTreeCacheIntegrationTest, Evictor_SkipsRequestPinnedBlock) {
 
     environment->scripted_per_rank_transfer_engine->clear();
     environment->demoteAll(Tier::DEVICE);
-    EXPECT_EQ(environment->scripted_per_rank_transfer_engine->submitCount(), 0u);
+    EXPECT_EQ(environment->scripted_per_rank_transfer_engine->submittedDescriptorCount(), 0u);
     EXPECT_TRUE(environment->allResourcesAtTier(Tier::DEVICE));
     environment->expectPayloads();
     environment->expectPoolFreeCounts({12, 12, 12}, {16, 16}, {16, 16});
@@ -864,7 +864,7 @@ TEST_F(BlockTreeCacheIntegrationTest, Evictor_SkipsRequestPinnedBlock) {
     environment->releaseRequestRefs();
     environment->demoteAll(Tier::DEVICE);
     EXPECT_TRUE(environment->allResourcesAtTier(Tier::HOST));
-    EXPECT_GT(environment->scripted_per_rank_transfer_engine->submitCount(), 0u);
+    EXPECT_GT(environment->scripted_per_rank_transfer_engine->submittedDescriptorCount(), 0u);
     environment->expectPayloads();
     environment->expectPoolFreeCounts({16, 16, 16}, {12, 12}, {16, 16});
     environment->reclaimAll();
@@ -901,7 +901,7 @@ TEST_P(BlockTreeCacheDemotionFailureTest, Evictor_DemotionFailure_RestoresSource
     environment->demoteAll(source_tier);
 
     EXPECT_TRUE(environment->allResourcesAtTier(source_tier));
-    EXPECT_GT(environment->scripted_per_rank_transfer_engine->submitCount(), 0u);
+    EXPECT_GT(environment->scripted_per_rank_transfer_engine->submittedDescriptorCount(), 0u);
     const std::vector<TransferDescriptor> failure_descriptors =
         environment->scripted_per_rank_transfer_engine->descriptors();
     for (const TransferDescriptor& descriptor : failure_descriptors) {
@@ -931,7 +931,7 @@ TEST_P(BlockTreeCacheDemotionFailureTest, Evictor_DemotionFailure_RestoresSource
     environment->scripted_per_rank_transfer_engine->clear();
     environment->demoteAll(source_tier);
     EXPECT_TRUE(environment->allResourcesAtTier(target_tier));
-    EXPECT_GT(environment->scripted_per_rank_transfer_engine->submitCount(), 0u);
+    EXPECT_GT(environment->scripted_per_rank_transfer_engine->submittedDescriptorCount(), 0u);
     const std::vector<TransferDescriptor> retry_descriptors =
         environment->scripted_per_rank_transfer_engine->descriptors();
     for (const TransferDescriptor& descriptor : retry_descriptors) {
@@ -1275,7 +1275,7 @@ TEST_F(BlockTreeCacheIntegrationTest, EvictionRejectsNonCanonicalTargetBeforeCop
     EXPECT_FALSE(BlockTreeCacheTestPeer::demoteOneForGroupSetForTest(*environment->cache, 1, Tier::DEVICE, Tier::DISK));
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*environment->cache);
     EXPECT_TRUE(environment->allResourcesAtTier(Tier::DEVICE));
-    EXPECT_EQ(environment->scripted_per_rank_transfer_engine->submitCount(), 0u);
+    EXPECT_EQ(environment->scripted_per_rank_transfer_engine->submittedDescriptorCount(), 0u);
 }
 
 TEST_F(BlockTreeCacheIntegrationTest, EvictionExplicitNoneCascadesAtLeafWithoutCopy) {
@@ -1295,7 +1295,7 @@ TEST_F(BlockTreeCacheIntegrationTest, EvictionExplicitNoneCascadesAtLeafWithoutC
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*environment->cache);
     auto result = environment->cache->tree()->findNode(environment->keys);
     EXPECT_TRUE(result.empty());
-    EXPECT_EQ(environment->scripted_per_rank_transfer_engine->submitCount(), 0u);
+    EXPECT_EQ(environment->scripted_per_rank_transfer_engine->submittedDescriptorCount(), 0u);
 }
 
 TEST_F(BlockTreeCacheIntegrationTest, DiskLoadRequestOnlyKeepsDiskResidency) {
@@ -1387,7 +1387,7 @@ TEST_P(BlockTreeCacheLowerTierTest, FullSWA_MatchLowerTierOnlyReturnsContextWith
     EXPECT_EQ(context->matchedBlocks(GetParam()), kPathLength);
     EXPECT_EQ(contextDescCountForGroupSet(context, 0), 4u);
     EXPECT_EQ(contextDescCountForGroupSet(context, 1), 2u);
-    EXPECT_EQ(environment->scripted_per_rank_transfer_engine->submitCount(), 0u);
+    EXPECT_EQ(environment->scripted_per_rank_transfer_engine->submittedDescriptorCount(), 0u);
     expectPlanningSourceRefCounts(*environment, GetParam());
     if (GetParam() == Tier::HOST) {
         environment->expectPoolFreeCounts({16, 16, 16}, {12, 12}, {16, 16});
@@ -1419,10 +1419,10 @@ TEST_P(BlockTreeCacheLowerTierTest, FullSWA_MatchLowerTierOnlyReturnsContextWith
     EXPECT_TRUE(context->success());
     expectUnpublishedResult(result);
 
-    const size_t submits_after_commit = environment->scripted_per_rank_transfer_engine->submitCount();
+    const size_t submits_after_commit = environment->scripted_per_rank_transfer_engine->submittedDescriptorCount();
     EXPECT_GT(submits_after_commit, 0u);
     EXPECT_FALSE(context->commit());
-    EXPECT_EQ(environment->scripted_per_rank_transfer_engine->submitCount(), submits_after_commit);
+    EXPECT_EQ(environment->scripted_per_rank_transfer_engine->submittedDescriptorCount(), submits_after_commit);
 
     BlockTreeMatchResult rematch = environment->cache->match(environment->keys);
     EXPECT_EQ(rematch.matched_device_blocks, kPathLength);
@@ -1973,7 +1973,7 @@ TEST_F(BlockTreeCacheIntegrationTest, MixedHostDiskContextAbortRestoresSources) 
     std::shared_ptr<LoadAsyncContext> context = takeLoadContext(result);
     ASSERT_NE(context, nullptr);
     EXPECT_EQ(context->matchedBlocks(), kPathLength);
-    EXPECT_EQ(environment->scripted_per_rank_transfer_engine->submitCount(), 0u);
+    EXPECT_EQ(environment->scripted_per_rank_transfer_engine->submittedDescriptorCount(), 0u);
 
     bool                                             saw_host = false;
     bool                                             saw_disk = false;
@@ -2058,7 +2058,7 @@ TEST_F(BlockTreeCacheIntegrationTest, FullSWA_MatchPublishesOnlyReadyBoundary) {
             EXPECT_EQ(desc.source_tier, Tier::HOST);
         }
     }
-    EXPECT_EQ(environment->scripted_per_rank_transfer_engine->submitCount(), 0u);
+    EXPECT_EQ(environment->scripted_per_rank_transfer_engine->submittedDescriptorCount(), 0u);
     environment->releaseMatch(result);
     context.reset();
     environment->releaseRequestRefs();
@@ -2096,7 +2096,7 @@ TEST_F(BlockTreeCacheIntegrationTest, DeviceLoadExplicitAbortImmediatelyRestores
         EXPECT_TRUE(pool->isAllocated(block));
         EXPECT_EQ(pool->refCount(block), 2u);
     }
-    EXPECT_EQ(environment->scripted_per_rank_transfer_engine->submitCount(), 0u);
+    EXPECT_EQ(environment->scripted_per_rank_transfer_engine->submittedDescriptorCount(), 0u);
     environment->expectPayloads();
     const size_t device_candidates_before_abort = environment->cache->getStats().device_heap_total_size;
 
@@ -2104,7 +2104,7 @@ TEST_F(BlockTreeCacheIntegrationTest, DeviceLoadExplicitAbortImmediatelyRestores
     const size_t device_candidates_after_abort = environment->cache->getStats().device_heap_total_size;
     EXPECT_GT(device_candidates_after_abort, device_candidates_before_abort);
     EXPECT_EQ(environment->cache->getStats().tree_node_count, tree_nodes_before);
-    EXPECT_EQ(environment->scripted_per_rank_transfer_engine->submitCount(), 0u);
+    EXPECT_EQ(environment->scripted_per_rank_transfer_engine->submittedDescriptorCount(), 0u);
     for (const auto& [pool, block] : device_sources) {
         EXPECT_EQ(pool->refCount(block), 1u);
     }
@@ -2254,7 +2254,7 @@ TEST_F(BlockTreeCacheIntegrationTest, SparseDisconnectedSWADoesNotPublishVacuous
     EXPECT_EQ(context->matchedBlocks(), kPathLength);
     EXPECT_EQ(contextDescCountForGroupSet(context, 0), 4u);
     EXPECT_EQ(contextDescCountForGroupSet(context, 1), 2u);
-    EXPECT_EQ(environment->scripted_per_rank_transfer_engine->submitCount(), 0u);
+    EXPECT_EQ(environment->scripted_per_rank_transfer_engine->submittedDescriptorCount(), 0u);
 
     for (const TransferDescriptor& desc : context->loadDescs()) {
         if (desc.group_set_id == 0) {

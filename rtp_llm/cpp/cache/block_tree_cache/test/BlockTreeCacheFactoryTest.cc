@@ -851,7 +851,7 @@ TEST_F(BlockTreeCacheFactoryTest, SharedPhysicalBackingWatermarkSharesPendingRel
 
     // One FULL+LINEAR plan contributes two physical releases. Both GroupSets
     // share the pending count for their common backing pool.
-    EXPECT_EQ(scripted_copy->submitCount(), 2u);
+    EXPECT_EQ(scripted_copy->submittedDescriptorCount(), 2u);
     EXPECT_EQ(backing->freeBlocksNum(), 3u);
     EXPECT_LT(backing->freeBlocksNum(), backing->totalBlocksNum());
     const auto descriptors = scripted_copy->descriptors();
@@ -898,13 +898,13 @@ TEST_F(BlockTreeCacheFactoryTest, FailedWatermarkPlanStopsThisPassAndRecomputesO
 
     // The failed accepted async plan is not recursively retried in the same
     // maintenance pass; rollback leaves the physical deficit intact.
-    EXPECT_EQ(scripted_copy->submitCount(), 1u);
+    EXPECT_EQ(scripted_copy->submittedDescriptorCount(), 1u);
     EXPECT_EQ(backing->freeBlocksNum(), 6u);
 
     scripted_copy->clear();
     block_tree_cache_test::BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
-    EXPECT_EQ(scripted_copy->submitCount(), 1u);
+    EXPECT_EQ(scripted_copy->submittedDescriptorCount(), 1u);
     EXPECT_EQ(backing->freeBlocksNum(), 7u);
 
     block_tree_cache_test::BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache, /*num_blocks=*/100, Tier::HOST);
@@ -935,7 +935,7 @@ TEST_F(BlockTreeCacheFactoryTest, DeviceMinFreeDoesNotTriggerBlockTreeWatermarkE
     submitBlockReleases(cache, releases);
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
 
-    EXPECT_EQ(scripted_copy->submitCount(), 0u);
+    EXPECT_EQ(scripted_copy->submittedDescriptorCount(), 0u);
     EXPECT_EQ(backing->freeBlocksNum(), 6u);
 }
 
