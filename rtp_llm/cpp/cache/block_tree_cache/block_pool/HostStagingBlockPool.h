@@ -17,6 +17,13 @@ class HostStagingBlockPool {
 public:
     static constexpr size_t kAlignment = 4096;
 
+    enum class State {
+        FREE,
+        STAGE1_IN_FLIGHT,
+        STAGE2_READY,
+        STAGE2_IN_FLIGHT,
+    };
+
     class HostStagingBlockLease {
     public:
         HostStagingBlockLease() = default;
@@ -61,6 +68,14 @@ public:
     // Exponential backoff with deadline; never sleeps while holding mutex_.
     std::optional<HostStagingBlockLease> mallocWithBackoff(std::chrono::milliseconds timeout);
 
+    State state() const {
+        return state_;
+    }
+
+    void setState(State state) {
+        state_ = state;
+    }
+
 private:
     friend class HostStagingBlockLease;
 
@@ -77,6 +92,7 @@ private:
     mutable std::mutex   mutex_;
     std::atomic<size_t>  timeout_count_{0};
     std::atomic<int64_t> last_timeout_log_ns_{0};
+    State                state_{State::FREE};
 };
 
 }  // namespace rtp_llm

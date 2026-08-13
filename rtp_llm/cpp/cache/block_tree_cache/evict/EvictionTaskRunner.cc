@@ -42,9 +42,9 @@ EvictionTaskResult EvictionTaskRunner::runTransfer(const EvictionTask&          
         transfer_started = true;
 
         std::vector<TransferDescriptor> descriptors;
-        const bool                      batch_ready      = buildTransferDescriptors(task, descriptors);
+        const bool                      transfer_ready   = buildTransferDescriptors(task, descriptors);
         bool                            transfer_success = false;
-        if (batch_ready) {
+        if (transfer_ready) {
             const auto                                 batches = partitionTransferDescriptors(descriptors);
             std::vector<std::shared_ptr<AsyncContext>> contexts;
             contexts.reserve(batches.size());

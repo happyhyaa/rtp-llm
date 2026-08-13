@@ -18,7 +18,7 @@ namespace {
 
 constexpr std::chrono::milliseconds kStagingAcquireTimeout{1000};
 constexpr size_t                    kPipelineWorkerCount = 1;
-constexpr size_t                    kPipelineQueueSize   = 1000;
+constexpr size_t                    kPipelineQueueSize   = 10000;
 
 ErrorInfo transferError(TransferStatus status, size_t begin, size_t end) {
     const ErrorCode code = status == TransferStatus::RESOURCE_EXHAUSTED ? ErrorCode::DEADLINE_EXCEEDED :
@@ -122,13 +122,11 @@ DeviceDiskTransferExecutor::DeviceDiskTransferExecutor(DeviceHostTransferExecuto
     for (const auto& group_set : group_sets) {
         max_payload_bytes = std::max(max_payload_bytes, group_set->payloadBytes());
     }
-    const size_t alignment   = HostStagingBlockPool::kAlignment;
+    const size_t alignment    = HostStagingBlockPool::kAlignment;
     const size_t stride_bytes = ((max_payload_bytes + alignment - 1) / alignment) * alignment;
     staging_pool_capacity_    = staging_block_count / 2;
-    for (auto& pool : staging_pools_) {
-        pool = std::make_unique<HostStagingBlockPool>(staging_pool_capacity_, stride_bytes);
-    }
-    pool_states_.fill(PoolState::FREE);
+    first_staging_pool_  = std::make_unique<HostStagingBlockPool>(staging_pool_capacity_, stride_bytes);
+    second_staging_pool_ = std::make_unique<HostStagingBlockPool>(staging_pool_capacity_, stride_bytes);
     disk_to_staging_task_pool_ =
         std::make_unique<BlockTreeTaskPool>(kPipelineWorkerCount, kPipelineQueueSize, "BlockDisk2Staging");
     staging_to_device_task_pool_ =
@@ -180,12 +178,12 @@ DeviceDiskTransferExecutor::execute(const std::vector<TransferDescriptor>& descr
 
 TransferStatus DeviceDiskTransferExecutor::execute(const TransferDescriptor& descriptor,
                                                    const GroupSet&           group_set) {
-    const auto pool_index = acquirePool(kStagingAcquireTimeout);
+    const auto pool_index = mallocPool(kStagingAcquireTimeout);
     if (!pool_index.has_value()) {
         return TransferStatus::RESOURCE_EXHAUSTED;
     }
     auto pool_guard = std::shared_ptr<void>(nullptr, [this, pool_index](void*) { releasePool(*pool_index); });
-    auto lease      = staging_pools_[*pool_index]->malloc();
+    auto lease      = stagingPool(*pool_index).malloc();
     RTP_LLM_CHECK(lease.has_value());
 
     const HostBufferView                 host = lease->blockBuffer(group_set.payloadBytes());
@@ -209,7 +207,7 @@ void DeviceDiskTransferExecutor::drainStageOne() {
             }
         }
 
-        const auto pool_index = acquirePool(kStagingAcquireTimeout);
+        const auto pool_index = mallocPool(kStagingAcquireTimeout);
         if (!pool_index.has_value()) {
             std::shared_ptr<BatchState> batch;
             {
@@ -249,7 +247,7 @@ void DeviceDiskTransferExecutor::drainStageOne() {
             slice->leases.reserve(end - begin);
             slice->hosts.reserve(end - begin);
             for (size_t index = begin; index < end; ++index) {
-                auto lease = staging_pools_[*pool_index]->malloc();
+                auto lease = stagingPool(*pool_index).malloc();
                 RTP_LLM_CHECK(lease.has_value());
                 slice->hosts.push_back(lease->blockBuffer(batch->group_sets[index]->payloadBytes()));
                 slice->leases.push_back(std::move(*lease));
@@ -305,9 +303,9 @@ void DeviceDiskTransferExecutor::drainStageOne() {
             continue;
         }
 
-        setPoolState(*pool_index, PoolState::STAGE2_READY);
+        setPoolState(*pool_index, HostStagingBlockPool::State::STAGE2_READY);
         const bool accepted = staging_to_device_task_pool_->submit([this, pool_work] {
-            setPoolState(pool_work->pool_index, PoolState::STAGE2_IN_FLIGHT);
+            setPoolState(pool_work->pool_index, HostStagingBlockPool::State::STAGE2_IN_FLIGHT);
             for (const auto& slice : pool_work->slices) {
                 try {
                     const TransferStatus status =
@@ -341,34 +339,39 @@ void DeviceDiskTransferExecutor::drainStageOne() {
     }
 }
 
-std::optional<size_t> DeviceDiskTransferExecutor::acquirePool(std::chrono::milliseconds timeout) {
+std::optional<size_t> DeviceDiskTransferExecutor::mallocPool(std::chrono::milliseconds timeout) {
     std::unique_lock<std::mutex> lock(pool_mutex_);
     const bool available = pool_cv_.wait_for(lock, timeout, [this] {
-        return pool_states_[0] == PoolState::FREE || pool_states_[1] == PoolState::FREE;
+        return first_staging_pool_->state() == HostStagingBlockPool::State::FREE
+            || second_staging_pool_->state() == HostStagingBlockPool::State::FREE;
     });
     if (!available) {
         return std::nullopt;
     }
-    for (size_t offset = 0; offset < pool_states_.size(); ++offset) {
-        const size_t index = (next_pool_index_ + offset) % pool_states_.size();
-        if (pool_states_[index] == PoolState::FREE) {
-            pool_states_[index] = PoolState::STAGE1_IN_FLIGHT;
-            next_pool_index_     = (index + 1) % pool_states_.size();
+    for (size_t offset = 0; offset < 2; ++offset) {
+        const size_t index = (next_pool_index_ + offset) % 2;
+        if (stagingPool(index).state() == HostStagingBlockPool::State::FREE) {
+            stagingPool(index).setState(HostStagingBlockPool::State::STAGE1_IN_FLIGHT);
+            next_pool_index_ = (index + 1) % 2;
             return index;
         }
     }
     return std::nullopt;
 }
 
-void DeviceDiskTransferExecutor::setPoolState(size_t pool_index, PoolState state) {
+HostStagingBlockPool& DeviceDiskTransferExecutor::stagingPool(size_t pool_index) {
+    return pool_index == 0 ? *first_staging_pool_ : *second_staging_pool_;
+}
+
+void DeviceDiskTransferExecutor::setPoolState(size_t pool_index, HostStagingBlockPool::State state) {
     std::lock_guard<std::mutex> lock(pool_mutex_);
-    pool_states_[pool_index] = state;
+    stagingPool(pool_index).setState(state);
 }
 
 void DeviceDiskTransferExecutor::releasePool(size_t pool_index) {
     {
         std::lock_guard<std::mutex> lock(pool_mutex_);
-        pool_states_[pool_index] = PoolState::FREE;
+        stagingPool(pool_index).setState(HostStagingBlockPool::State::FREE);
     }
     pool_cv_.notify_one();
 }
