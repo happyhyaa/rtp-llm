@@ -18,9 +18,9 @@ EvictionTaskRunner::EvictionTaskRunner(const std::vector<GroupSetPtr>& group_set
 EvictionTaskResult EvictionTaskRunner::runPerRankTransfer(const EvictionTask& task) const {
     EvictionTaskResult              task_result;
     std::vector<TransferDescriptor> descriptors;
-    bool                            transfer_success = buildTransferDescriptors(task, descriptors);
+    const bool                      transfer_ready = buildTransferDescriptors(task, descriptors);
     const auto                      batches =
-        transfer_success ? partitionTransferDescriptors(descriptors) : std::vector<std::vector<TransferDescriptor>>{};
+        transfer_ready ? partitionTransferDescriptors(descriptors) : std::vector<std::vector<TransferDescriptor>>{};
 
     std::vector<std::shared_ptr<AsyncContext>> contexts;
     contexts.reserve(batches.size());
@@ -29,7 +29,7 @@ EvictionTaskResult EvictionTaskRunner::runPerRankTransfer(const EvictionTask& ta
     }
     FusedAsyncContext context(contexts);
     context.waitDone();
-    transfer_success = transfer_success && context.success();
+    const bool transfer_success = transfer_ready && context.success();
     task_result.primary_success = transfer_success;
     task_result.cascade_success.assign(task.cascade_descs.size(), transfer_success);
     return task_result;
@@ -42,9 +42,9 @@ EvictionTaskResult EvictionTaskRunner::runTransfer(const EvictionTask& task) con
 
     EvictionTaskResult              task_result;
     std::vector<TransferDescriptor> descriptors;
-    const bool                      batch_ready      = buildTransferDescriptors(task, descriptors);
-    bool transfer_success = false;
-    if (batch_ready) {
+    const bool                      transfer_ready   = buildTransferDescriptors(task, descriptors);
+    bool                            transfer_success = false;
+    if (transfer_ready) {
         const auto                                 batches = partitionTransferDescriptors(descriptors);
         std::vector<std::shared_ptr<AsyncContext>> contexts;
         contexts.reserve(batches.size());
