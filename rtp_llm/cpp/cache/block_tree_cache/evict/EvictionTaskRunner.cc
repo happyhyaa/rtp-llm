@@ -191,9 +191,9 @@ void EvictionTaskRunner::runTask(BlockTreeEvictor& evictor, const BlockTreeEvict
 BlockTreeEvictor::CopyResultSet EvictionTaskRunner::performCopy(const BlockTreeEvictor::EvictionPlan& plan) const {
     BlockTreeEvictor::CopyResultSet results;
     std::vector<TransferDescriptor> descriptors;
-    bool                            transfer_success = buildTransferBatch(plan, descriptors);
-    const auto batches = transfer_success ? partitionTransferBatch(descriptors)
-                                          : std::vector<std::vector<TransferDescriptor>>{};
+    const bool transfer_ready = buildTransferBatch(plan, descriptors);
+    const auto batches =
+        transfer_ready ? partitionTransferBatch(descriptors) : std::vector<std::vector<TransferDescriptor>>{};
 
     std::vector<std::shared_ptr<AsyncContext>> contexts;
     contexts.reserve(batches.size());
@@ -202,7 +202,7 @@ BlockTreeEvictor::CopyResultSet EvictionTaskRunner::performCopy(const BlockTreeE
     }
     FusedAsyncContext context(contexts);
     context.waitDone();
-    transfer_success = transfer_success && context.success();
+    const bool transfer_success = transfer_ready && context.success();
     results.primary_success = transfer_success;
     results.cascade_success.assign(plan.cascade_descs.size(), transfer_success);
     return results;
@@ -215,9 +215,9 @@ BlockTreeEvictor::CopyResultSet EvictionTaskRunner::runTransfer(const BlockTreeE
 
     BlockTreeEvictor::CopyResultSet results;
     std::vector<TransferDescriptor> descriptors;
-    const bool                      batch_ready      = buildTransferBatch(plan, descriptors);
-    bool transfer_success = false;
-    if (batch_ready) {
+    const bool transfer_ready   = buildTransferBatch(plan, descriptors);
+    bool       transfer_success = false;
+    if (transfer_ready) {
         const auto batches = partitionTransferBatch(descriptors);
         std::vector<std::shared_ptr<AsyncContext>> contexts;
         contexts.reserve(batches.size());

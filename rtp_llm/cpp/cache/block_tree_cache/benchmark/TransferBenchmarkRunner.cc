@@ -24,6 +24,8 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 
+constexpr size_t kTransferBatchSize = 64;
+
 int64_t elapsedNs(Clock::time_point start, Clock::time_point end) {
     return std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count();
 }
@@ -588,30 +590,47 @@ TransferBenchmarkRunner::runTransferBatch(const std::shared_ptr<PerRankBlockTran
                                                            seed_,
                                                            worker_count,
                                                            worker);
-            for (const auto& operation : operations) {
-                const auto& direction = directions[operation.direction_index];
-                auto&       stats     = result.directions.at(direction);
-                ++stats.attempted;
-                result.visited_working_set[operation.working_set_index] = true;
-                auto descriptor                                         = createDescriptor(direction,
-                                                   device_blocks,
-                                                   host_blocks,
-                                                   disk_blocks,
-                                                   worker,
-                                                   operation.working_set_index,
-                                                   host_is_working_set);
-                auto context                                            = engine->submit({descriptor});
+            std::map<std::string, std::vector<TransferDescriptor>> pending_batches;
+            const auto flush_batch = [&](const std::string& direction) {
+                auto& batch = pending_batches[direction];
+                if (batch.empty()) {
+                    return;
+                }
+                auto& stats   = result.directions.at(direction);
+                auto  context = engine->submit(batch);
                 context->waitDone();
                 if (context->success()) {
-                    ++stats.succeeded;
+                    stats.succeeded += batch.size();
                 } else {
-                    ++stats.failed;
+                    stats.failed += batch.size();
                     if (stats.first_error.empty()) {
                         const auto error         = context->errorInfo();
                         stats.first_error        = error.ToString();
                         stats.first_failure_type = ErrorCodeToString(error.code());
                     }
                 }
+                batch.clear();
+            };
+            for (const auto& operation : operations) {
+                const auto& direction = directions[operation.direction_index];
+                auto&       stats     = result.directions.at(direction);
+                ++stats.attempted;
+                result.visited_working_set[operation.working_set_index] = true;
+                auto descriptor = createDescriptor(direction,
+                                                   device_blocks,
+                                                   host_blocks,
+                                                   disk_blocks,
+                                                   worker,
+                                                   operation.working_set_index,
+                                                   host_is_working_set);
+                auto& batch = pending_batches[direction];
+                batch.push_back(std::move(descriptor));
+                if (direction == "d2disk" || batch.size() >= kTransferBatchSize) {
+                    flush_batch(direction);
+                }
+            }
+            for (const auto& direction : directions) {
+                flush_batch(direction);
             }
         });
     }
