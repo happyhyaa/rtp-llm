@@ -76,9 +76,10 @@ class GenerateConfigTest(TestCase):
         config.host_eviction_policy = "lfu"
         config.disk_eviction_policy = "lru"
         config.device_cache_min_free_blocks = 123
+        config.memory_cache_max_descriptors_per_transfer_batch = 456
 
         state = config.__getstate__()
-        self.assertEqual(len(state), 50)
+        self.assertEqual(len(state), 51)
 
         restored = pickle.loads(pickle.dumps(config))
         self.assertEqual(restored.disk_cache_staging_block_count, 8)
@@ -88,6 +89,7 @@ class GenerateConfigTest(TestCase):
         self.assertEqual(restored.host_eviction_policy, "lfu")
         self.assertEqual(restored.disk_eviction_policy, "lru")
         self.assertEqual(restored.device_cache_min_free_blocks, 123)
+        self.assertEqual(restored.memory_cache_max_descriptors_per_transfer_batch, 456)
 
         config.enable_disk_cache = True
         restored_enabled = pickle.loads(pickle.dumps(config))

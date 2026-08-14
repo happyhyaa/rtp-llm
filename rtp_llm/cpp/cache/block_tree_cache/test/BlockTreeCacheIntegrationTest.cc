@@ -441,7 +441,7 @@ TEST_F(BlockTreeCacheIntegrationTest, HostDiskOnlyLifecycle) {
     EXPECT_EQ(disk_pool->freeBlocksNum(), 8u);
 }
 
-TEST_F(BlockTreeCacheIntegrationTest, OneShotCascadeFailureRollsBackSWAAndRetriesOnce) {
+TEST_F(BlockTreeCacheIntegrationTest, OneShotPrimaryFailureSuppressesCascadeAndRetriesOnce) {
     ASSERT_TRUE(cudaAvailable()) << "C002-T05 requires CUDA";
     FullSWAEnvironmentOptions options;
     options.path_length = 1;
@@ -464,16 +464,12 @@ TEST_F(BlockTreeCacheIntegrationTest, OneShotCascadeFailureRollsBackSWAAndRetrie
 
     const std::vector<TransferDescriptor> first_descriptors =
         environment->scripted_per_rank_transfer_engine->descriptors();
-    ASSERT_EQ(first_descriptors.size(), 2u);
+    ASSERT_EQ(first_descriptors.size(), 1u);
     EXPECT_EQ(first_descriptors[0].group_set_id, 0);
     EXPECT_EQ(first_descriptors[0].source_tier, Tier::DEVICE);
     EXPECT_EQ(first_descriptors[0].target_tier, Tier::HOST);
     EXPECT_EQ(first_descriptors[0].source_blocks, full_sources);
-    EXPECT_EQ(first_descriptors[1].group_set_id, 1);
-    EXPECT_EQ(first_descriptors[1].source_tier, Tier::DEVICE);
-    EXPECT_EQ(first_descriptors[1].target_tier, Tier::HOST);
-    EXPECT_EQ(first_descriptors[1].source_blocks, (std::vector<BlockIdxType>{swa_source}));
-    EXPECT_EQ(environment->scripted_per_rank_transfer_engine->submittedDescriptorCount(), 2u);
+    EXPECT_EQ(environment->scripted_per_rank_transfer_engine->submittedDescriptorCount(), 1u);
 
     const std::vector<GroupSetResource> after_failure = environment->resourcesForPathNode(0);
     ASSERT_EQ(after_failure.size(), 2u);
@@ -505,7 +501,7 @@ TEST_F(BlockTreeCacheIntegrationTest, OneShotCascadeFailureRollsBackSWAAndRetrie
         EXPECT_EQ(descriptor.source_tier, Tier::DEVICE);
         EXPECT_EQ(descriptor.target_tier, Tier::HOST);
     }
-    EXPECT_EQ(environment->scripted_per_rank_transfer_engine->submittedBatchCount(), 1u);
+    EXPECT_EQ(environment->scripted_per_rank_transfer_engine->submittedBatchCount(), 2u);
 
     const std::vector<GroupSetResource> after_retry = environment->resourcesForPathNode(0);
     ASSERT_EQ(after_retry.size(), 2u);
@@ -1182,17 +1178,17 @@ TEST_F(BlockTreeCacheIntegrationTest, ReverseEvictionTieredEndToEnd) {
     environment->insertRequestPath();
     environment->releaseRequestRefs();
 
-    // Start from the lower-priority SWA group. A failed primary copy rolls back
-    // both SWA and its reverse-selected FULL sibling without publishing Host.
+    // Start from the lower-priority SWA group. A failed primary copy suppresses
+    // its reverse-selected FULL cascade and rolls back both without publishing Host.
     environment->scripted_per_rank_transfer_engine->clear();
     environment->scripted_per_rank_transfer_engine->enqueue(/*success=*/false);
     ASSERT_TRUE(BlockTreeCacheTestPeer::demoteOneForGroupSetForTest(*environment->cache, 1, Tier::DEVICE));
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*environment->cache);
     EXPECT_TRUE(environment->allResourcesAtTier(Tier::DEVICE));
     const auto failed_descriptors = environment->scripted_per_rank_transfer_engine->descriptors();
-    ASSERT_EQ(failed_descriptors.size(), 2u);
+    ASSERT_EQ(failed_descriptors.size(), 1u);
     EXPECT_EQ(failed_descriptors[0].group_set_id, 1);
-    EXPECT_EQ(failed_descriptors[1].group_set_id, 0);
+    EXPECT_EQ(environment->scripted_per_rank_transfer_engine->submittedBatchCount(), 1u);
     for (const TransferDescriptor& descriptor : failed_descriptors) {
         EXPECT_EQ(descriptor.source_tier, Tier::DEVICE);
         EXPECT_EQ(descriptor.target_tier, Tier::HOST);

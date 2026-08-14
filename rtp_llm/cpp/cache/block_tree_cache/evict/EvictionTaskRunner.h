@@ -21,8 +21,6 @@ public:
 
 private:
     static bool        buildTransferDescriptors(const EvictionTask& task, std::vector<TransferDescriptor>& descriptors);
-    std::vector<std::vector<TransferDescriptor>>
-               partitionTransferDescriptors(const std::vector<TransferDescriptor>& descriptors) const;
     static int selectTransferTimeoutMs(const EvictionTask& task, int memory_timeout_ms, int disk_timeout_ms);
 
     const std::vector<GroupSetPtr>& group_sets_;

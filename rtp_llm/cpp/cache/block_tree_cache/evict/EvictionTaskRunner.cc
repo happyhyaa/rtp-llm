@@ -1,7 +1,5 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/evict/EvictionTaskRunner.h"
 
-#include <algorithm>
-
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheMetricsReporter.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
 
@@ -42,55 +40,36 @@ EvictionTaskResult EvictionTaskRunner::runTransfer(const EvictionTask&          
         transfer_started = true;
 
         std::vector<TransferDescriptor> descriptors;
-        const bool                      transfer_ready   = buildTransferDescriptors(task, descriptors);
-        bool                            transfer_success = false;
-        if (transfer_ready) {
-            const auto                                 batches = partitionTransferDescriptors(descriptors);
-            std::vector<std::shared_ptr<AsyncContext>> contexts;
-            contexts.reserve(batches.size());
-            for (const auto& batch : batches) {
-                contexts.push_back(transfer_dispatcher_->executeMultiRank(
-                    batch, selectTransferTimeoutMs(task, memory_timeout_ms_, disk_timeout_ms_)));
+        const bool                      transfer_ready = buildTransferDescriptors(task, descriptors);
+        task_result.cascade_success.assign(task.cascade_descs.size(), false);
+        if (!transfer_ready) {
+            finish_metrics();
+            return task_result;
+        }
+
+        const int timeout_ms = selectTransferTimeoutMs(task, memory_timeout_ms_, disk_timeout_ms_);
+        const auto execute = [&](const TransferDescriptor& descriptor) {
+            auto context = transfer_dispatcher_->executeMultiRank({descriptor}, timeout_ms);
+            context->waitDone();
+            const bool transfer_success = context->success();
+            if (transfer_success) {
+                metrics_reporter.accumulateTransferBytes({descriptor}, group_sets_, transfer_bytes);
             }
-            FusedAsyncContext context(contexts);
-            context.waitDone();
-            transfer_success = context.success();
+            return transfer_success;
+        };
+
+        task_result.primary_success = execute(task.primary_desc);
+        if (task_result.primary_success) {
+            for (size_t i = 0; i < task.cascade_descs.size(); ++i) {
+                task_result.cascade_success[i] = execute(task.cascade_descs[i]);
+            }
         }
-        if (transfer_success) {
-            metrics_reporter.accumulateTransferBytes(descriptors, group_sets_, transfer_bytes);
-        }
-        task_result.primary_success = transfer_success;
-        task_result.cascade_success.assign(task.cascade_descs.size(), transfer_success);
         finish_metrics();
         return task_result;
     } catch (...) {
         finish_metrics();
         throw;
     }
-}
-
-std::vector<std::vector<TransferDescriptor>>
-EvictionTaskRunner::partitionTransferDescriptors(const std::vector<TransferDescriptor>& descriptors) const {
-    const auto disk_pool = [this](const TransferDescriptor& descriptor) {
-        if (descriptor.source_tier != Tier::DISK && descriptor.target_tier != Tier::DISK) {
-            return static_cast<BlockTreeDiskBlockPool*>(nullptr);
-        }
-        return group_sets_[descriptor.group_set_id]->diskPool().get();
-    };
-    std::vector<std::vector<TransferDescriptor>> batches;
-    for (const auto& descriptor : descriptors) {
-        auto batch = std::find_if(batches.begin(), batches.end(), [&](const auto& current) {
-            return current.front().source_tier == descriptor.source_tier
-                && current.front().target_tier == descriptor.target_tier
-                && disk_pool(current.front()) == disk_pool(descriptor);
-        });
-        if (batch == batches.end()) {
-            batches.push_back({descriptor});
-        } else {
-            batch->push_back(descriptor);
-        }
-    }
-    return batches;
 }
 
 bool EvictionTaskRunner::buildTransferDescriptors(const EvictionTask&              task,
