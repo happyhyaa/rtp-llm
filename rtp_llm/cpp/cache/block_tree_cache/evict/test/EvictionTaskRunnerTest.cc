@@ -67,7 +67,7 @@ protected:
     }
 
     EvictionTaskRunner makeRunner() {
-        return EvictionTaskRunner(group_sets_, transfer_dispatcher_.get(), 0, 0);
+        return EvictionTaskRunner(transfer_dispatcher_.get(), 0, 0);
     }
 
     std::vector<GroupSetPtr>                 group_sets_;
@@ -93,7 +93,7 @@ EvictionTask makeCopyTask() {
     return task;
 }
 
-TEST_F(EvictionTaskRunnerTest, RunTransferSubmitsTaskAsDirectionBatches) {
+TEST_F(EvictionTaskRunnerTest, RunTransferSubmitsPrimaryBeforeGroupSetBatches) {
     auto runner = makeRunner();
     auto task   = makeCopyTask();
     task.cascade_descs.push_back(TransferDescriptor::hostToDisk(2, 6, 7));
@@ -103,7 +103,7 @@ TEST_F(EvictionTaskRunnerTest, RunTransferSubmitsTaskAsDirectionBatches) {
 
     EXPECT_TRUE(task_result.primary_success);
     EXPECT_EQ(task_result.cascade_success, (std::vector<bool>{true, true}));
-    EXPECT_EQ(transfer_engine_->batchCount(), 2u);
+    EXPECT_EQ(transfer_engine_->batchCount(), 3u);
     ASSERT_EQ(descriptors.size(), 3u);
     EXPECT_EQ(descriptors[0].source_tier, Tier::DEVICE);
     EXPECT_EQ(descriptors[0].target_tier, Tier::HOST);
@@ -113,9 +113,7 @@ TEST_F(EvictionTaskRunnerTest, RunTransferSubmitsTaskAsDirectionBatches) {
     EXPECT_EQ(descriptors[2].target_tier, Tier::DISK);
 }
 
-TEST_F(EvictionTaskRunnerTest, HostDiskBatchesAreSplitByDiskPool) {
-    group_sets_ = {makeRunnerTestGroupSet(0, "eviction_runner_0", makeRunnerTestDiskPool("eviction_runner_0_disk")),
-                   makeRunnerTestGroupSet(1, "eviction_runner_1", makeRunnerTestDiskPool("eviction_runner_1_disk"))};
+TEST_F(EvictionTaskRunnerTest, HostDiskBatchesAreSplitByGroupSetEvenWhenDiskPoolIsShared) {
     auto runner = makeRunner();
     EvictionTask task;
     task.primary_desc  = TransferDescriptor::hostToDisk(0, 1, 2);
@@ -125,11 +123,33 @@ TEST_F(EvictionTaskRunnerTest, HostDiskBatchesAreSplitByDiskPool) {
 
     EXPECT_TRUE(task_result.primary_success);
     EXPECT_EQ(task_result.cascade_success, (std::vector<bool>{true, true}));
-    EXPECT_EQ(transfer_engine_->batchCount(), 2u);
+    EXPECT_EQ(transfer_engine_->batchCount(), 3u);
     EXPECT_EQ(transfer_engine_->descriptors().size(), 3u);
 }
 
-TEST_F(EvictionTaskRunnerTest, DirectionBatchFailureFailsTheWholeTask) {
+TEST_F(EvictionTaskRunnerTest, SameDirectionAndGroupSetCascadesShareBatch) {
+    auto runner = makeRunner();
+    auto task   = makeCopyTask();
+    task.cascade_descs = {TransferDescriptor::hostToDisk(1, 4, 5), TransferDescriptor::hostToDisk(1, 6, 7)};
+
+    const auto task_result = runner.runTransfer(task);
+
+    EXPECT_TRUE(task_result.primary_success);
+    EXPECT_EQ(task_result.cascade_success, (std::vector<bool>{true, true}));
+    EXPECT_EQ(transfer_engine_->batchCount(), 2u);
+}
+
+TEST_F(EvictionTaskRunnerTest, DeviceToDiskDescriptorsRemainSingletonBatches) {
+    auto runner = makeRunner();
+    const auto batches = runner.partitionTransferDescriptors(
+        {TransferDescriptor::deviceToDisk(1, {1}, 2), TransferDescriptor::deviceToDisk(1, {3}, 4)});
+
+    ASSERT_EQ(batches.size(), 2u);
+    EXPECT_EQ(batches[0].descriptors.size(), 1u);
+    EXPECT_EQ(batches[1].descriptors.size(), 1u);
+}
+
+TEST_F(EvictionTaskRunnerTest, PrimaryFailureSuppressesCascadeBatches) {
     transfer_engine_->enqueue(false);
     auto runner = makeRunner();
 
@@ -137,7 +157,25 @@ TEST_F(EvictionTaskRunnerTest, DirectionBatchFailureFailsTheWholeTask) {
 
     EXPECT_FALSE(task_result.primary_success);
     EXPECT_EQ(task_result.cascade_success, (std::vector<bool>{false}));
-    EXPECT_EQ(transfer_engine_->batchCount(), 2u);
+    EXPECT_EQ(transfer_engine_->batchCount(), 1u);
+    const auto descriptors = transfer_engine_->descriptors();
+    ASSERT_EQ(descriptors.size(), 1u);
+    EXPECT_EQ(descriptors[0].group_set_id, 0u);
+}
+
+TEST_F(EvictionTaskRunnerTest, CascadeBatchResultsAreReportedIndependently) {
+    transfer_engine_->enqueue(true);
+    transfer_engine_->enqueue(false);
+    transfer_engine_->enqueue(true);
+    auto runner = makeRunner();
+    auto task   = makeCopyTask();
+    task.cascade_descs.push_back(TransferDescriptor::hostToDisk(2, 6, 7));
+
+    const auto task_result = runner.runTransfer(task);
+
+    EXPECT_TRUE(task_result.primary_success);
+    EXPECT_EQ(task_result.cascade_success, (std::vector<bool>{false, true}));
+    EXPECT_EQ(transfer_engine_->batchCount(), 3u);
 }
 
 TEST_F(EvictionTaskRunnerTest, RunTransferRejectsMalformedDescriptors) {

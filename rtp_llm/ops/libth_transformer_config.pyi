@@ -655,6 +655,7 @@ class KVCacheConfig:
     host_eviction_policy: str
     disk_eviction_policy: str
     device_cache_min_free_blocks: int
+    memory_cache_max_descriptors_per_transfer_batch: int
     fp8_kv_cache: int
     kv_cache_mem_mb: int
     linear_step: int

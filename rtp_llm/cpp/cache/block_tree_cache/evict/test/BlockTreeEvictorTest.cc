@@ -1379,7 +1379,7 @@ TEST(BlockTreeEvictorCascadeTest, CascadeTargetExhaustionRestoresOnlyFailedSibli
     environment.expectAllPoolsFree();
 }
 
-TEST(BlockTreeEvictorCascadeTest, BatchFailureAbortsFullTask) {
+TEST(BlockTreeEvictorCascadeTest, PrimaryCopyFailureSuppressesCascadesAndRollsBackFullTask) {
     CascadeTestEnvironment environment;
     ASSERT_TRUE(environment.init());
     environment.setTransferResults({false, true, true});
@@ -1390,7 +1390,7 @@ TEST(BlockTreeEvictorCascadeTest, BatchFailureAbortsFullTask) {
     auto task_result = environment.evictor_->task_runner_->runTransfer(*task);
     EXPECT_FALSE(task_result.primary_success);
     EXPECT_EQ(task_result.cascade_success, (std::vector<bool>{false, false}));
-    EXPECT_EQ(environment.transferGroupSetIds(), (std::vector<size_t>{0, 1, 2}));
+    EXPECT_EQ(environment.transferGroupSetIds(), (std::vector<size_t>{0}));
 
     environment.evictor_->settleEvictionLocked(*task, task_result);
     for (size_t group_set_id = 0; group_set_id < environment.groups_.size(); ++group_set_id) {
@@ -1402,6 +1402,51 @@ TEST(BlockTreeEvictorCascadeTest, BatchFailureAbortsFullTask) {
         EXPECT_EQ(environment.host_pools_[group_set_id]->activeTreeCachedBlocksNum(), 0u);
     }
     EXPECT_EQ(environment.evictor_->candidateStats().host_candidates, 3u);
+
+    environment.releaseResidentBlocks();
+    environment.expectAllPoolsFree();
+}
+
+TEST(BlockTreeEvictorCascadeTest, CascadeCopyResultsPublishAndRollbackIndependently) {
+    CascadeTestEnvironment environment;
+    ASSERT_TRUE(environment.init());
+    environment.setTransferResults({true, false, true});
+
+    auto task = environment.prepareTask(0);
+    ASSERT_TRUE(task.has_value());
+    ASSERT_EQ(cascadeGroupSetIds(*task), (std::vector<size_t>{1, 2}));
+    const BlockIdxType primary_target = task->primary_desc.target_blocks[0];
+    const BlockIdxType failed_target  = task->cascade_descs[0].target_blocks[0];
+    const BlockIdxType success_target = task->cascade_descs[1].target_blocks[0];
+
+    auto task_result = environment.evictor_->task_runner_->runTransfer(*task);
+    ASSERT_TRUE(task_result.primary_success);
+    EXPECT_EQ(task_result.cascade_success, (std::vector<bool>{false, true}));
+    EXPECT_EQ(environment.transferGroupSetIds(), (std::vector<size_t>{0, 1, 2}));
+    environment.evictor_->settleEvictionLocked(*task, task_result);
+
+    const auto& primary_resource = environment.node_->group_set_resources[0];
+    const auto& failed_resource  = environment.node_->group_set_resources[1];
+    const auto& success_resource = environment.node_->group_set_resources[2];
+    EXPECT_EQ(primary_resource.transfer_state, GroupSetTransferState::IDLE);
+    EXPECT_FALSE(primary_resource.hasTier(Tier::HOST));
+    EXPECT_EQ(primary_resource.disk_slot, primary_target);
+    EXPECT_EQ(environment.disk_pools_[0]->refCount(primary_target), 1u);
+    EXPECT_FALSE(environment.host_pools_[0]->isAllocated(environment.host_blocks_[0]));
+
+    EXPECT_EQ(failed_resource.transfer_state, GroupSetTransferState::IDLE);
+    EXPECT_EQ(failed_resource.host_block, environment.host_blocks_[1]);
+    EXPECT_EQ(environment.host_pools_[1]->refCount(environment.host_blocks_[1]), 1u);
+    EXPECT_FALSE(environment.disk_pools_[1]->isAllocated(failed_target));
+    EXPECT_EQ(environment.disk_pools_[1]->freeBlocksNum(), 2u);
+    EXPECT_EQ(environment.host_pools_[1]->activeTreeCachedBlocksNum(), 0u);
+    EXPECT_EQ(environment.evictor_->candidateStats().host_candidates, 1u);
+
+    EXPECT_EQ(success_resource.transfer_state, GroupSetTransferState::IDLE);
+    EXPECT_FALSE(success_resource.hasTier(Tier::HOST));
+    EXPECT_EQ(success_resource.disk_slot, success_target);
+    EXPECT_EQ(environment.disk_pools_[2]->refCount(success_target), 1u);
+    EXPECT_FALSE(environment.host_pools_[2]->isAllocated(environment.host_blocks_[2]));
 
     environment.releaseResidentBlocks();
     environment.expectAllPoolsFree();

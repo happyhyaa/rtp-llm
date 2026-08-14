@@ -33,8 +33,7 @@ BlockTreeEvictor::BlockTreeEvictor(BlockTree*                     tree,
     mutex_(&mutex),
     is_tier_enabled_(std::move(is_tier_enabled)),
     settled_(std::move(settled)),
-    task_runner_(std::make_unique<EvictionTaskRunner>(
-        tree->groupSets(), transfer_dispatcher, memory_timeout_ms, disk_timeout_ms)) {
+    task_runner_(std::make_unique<EvictionTaskRunner>(transfer_dispatcher, memory_timeout_ms, disk_timeout_ms)) {
     // GroupSetFactory has already validated that group_set_id equals the vector
     // position. Own one heap per (group resource, tier).
     heaps_.resize(tree_->groupSets().size());

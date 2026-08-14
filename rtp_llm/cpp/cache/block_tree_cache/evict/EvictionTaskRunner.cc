@@ -6,80 +6,86 @@
 
 namespace rtp_llm {
 
-EvictionTaskRunner::EvictionTaskRunner(const std::vector<GroupSetPtr>& group_sets,
-                                       const BlockTransferDispatcher*  transfer_dispatcher,
-                                       int                             memory_timeout_ms,
-                                       int                             disk_timeout_ms):
-    group_sets_(group_sets),
+EvictionTaskRunner::EvictionTaskRunner(const BlockTransferDispatcher* transfer_dispatcher,
+                                       int                            memory_timeout_ms,
+                                       int                            disk_timeout_ms):
     transfer_dispatcher_(transfer_dispatcher),
     memory_timeout_ms_(memory_timeout_ms),
     disk_timeout_ms_(disk_timeout_ms) {}
 
 EvictionTaskResult EvictionTaskRunner::runPerRankTransfer(const EvictionTask& task) const {
-    EvictionTaskResult              task_result;
-    std::vector<TransferDescriptor> descriptors;
-    const bool                      transfer_ready = buildTransferDescriptors(task, descriptors);
-    const auto                      batches =
-        transfer_ready ? partitionTransferDescriptors(descriptors) : std::vector<std::vector<TransferDescriptor>>{};
-
-    std::vector<std::shared_ptr<AsyncContext>> contexts;
-    contexts.reserve(batches.size());
-    for (const auto& batch : batches) {
-        contexts.push_back(transfer_dispatcher_->executePerRank(batch));
-    }
-    FusedAsyncContext context(contexts);
-    context.waitDone();
-    const bool transfer_success = transfer_ready && context.success();
-    task_result.primary_success = transfer_success;
-    task_result.cascade_success.assign(task.cascade_descs.size(), transfer_success);
-    return task_result;
+    return executeTransfer(task, false);
 }
 
 EvictionTaskResult EvictionTaskRunner::runTransfer(const EvictionTask& task) const {
     if (!transfer_dispatcher_->hasMultiRankEngine()) {
         return runPerRankTransfer(task);
     }
+    return executeTransfer(task, true);
+}
 
-    EvictionTaskResult              task_result;
+EvictionTaskResult EvictionTaskRunner::executeTransfer(const EvictionTask& task, bool multi_rank) const {
+    EvictionTaskResult task_result;
+    task_result.cascade_success.assign(task.cascade_descs.size(), false);
+
     std::vector<TransferDescriptor> descriptors;
-    const bool                      transfer_ready   = buildTransferDescriptors(task, descriptors);
-    bool                            transfer_success = false;
-    if (transfer_ready) {
-        const auto                                 batches = partitionTransferDescriptors(descriptors);
-        std::vector<std::shared_ptr<AsyncContext>> contexts;
-        contexts.reserve(batches.size());
-        for (const auto& batch : batches) {
-            contexts.push_back(transfer_dispatcher_->executeMultiRank(
-                batch, selectTransferTimeoutMs(task, memory_timeout_ms_, disk_timeout_ms_)));
-        }
-        FusedAsyncContext context(contexts);
-        context.waitDone();
-        transfer_success = context.success();
+    const bool transfer_ready = buildTransferDescriptors(task, descriptors);
+    if (!transfer_ready) {
+        return task_result;
     }
-    task_result.primary_success = transfer_success;
-    task_result.cascade_success.assign(task.cascade_descs.size(), transfer_success);
+
+    const auto submit = [this, &task, multi_rank](const std::vector<TransferDescriptor>& batch) {
+        if (multi_rank) {
+            return transfer_dispatcher_->executeMultiRank(
+                batch, selectTransferTimeoutMs(task, memory_timeout_ms_, disk_timeout_ms_));
+        }
+        return transfer_dispatcher_->executePerRank(batch);
+    };
+
+    const std::vector<TransferDescriptor> primary_batch{descriptors.front()};
+    const auto                            primary_context = submit(primary_batch);
+    primary_context->waitDone();
+    task_result.primary_success = primary_context->success();
+    if (!task_result.primary_success) {
+        return task_result;
+    }
+
+    const std::vector<TransferDescriptor> cascade_descriptors(descriptors.begin() + 1, descriptors.end());
+    const auto                            batches = partitionTransferDescriptors(cascade_descriptors);
+    std::vector<std::shared_ptr<AsyncContext>> contexts;
+    contexts.reserve(batches.size());
+    for (const auto& batch : batches) {
+        contexts.push_back(submit(batch.descriptors));
+    }
+    for (size_t batch_index = 0; batch_index < batches.size(); ++batch_index) {
+        contexts[batch_index]->waitDone();
+        const bool transfer_success = contexts[batch_index]->success();
+        for (const size_t descriptor_index : batches[batch_index].descriptor_indices) {
+            task_result.cascade_success[descriptor_index] = transfer_success;
+        }
+    }
     return task_result;
 }
 
-std::vector<std::vector<TransferDescriptor>>
+std::vector<EvictionTaskRunner::TransferBatch>
 EvictionTaskRunner::partitionTransferDescriptors(const std::vector<TransferDescriptor>& descriptors) const {
-    const auto disk_pool = [this](const TransferDescriptor& descriptor) {
-        if (descriptor.source_tier != Tier::DISK && descriptor.target_tier != Tier::DISK) {
-            return static_cast<BlockTreeDiskBlockPool*>(nullptr);
+    std::vector<TransferBatch> batches;
+    for (size_t descriptor_index = 0; descriptor_index < descriptors.size(); ++descriptor_index) {
+        const auto& descriptor   = descriptors[descriptor_index];
+        const bool  force_single = descriptor.source_tier == Tier::DEVICE && descriptor.target_tier == Tier::DISK;
+        auto        batch        = batches.end();
+        if (!force_single) {
+            batch = std::find_if(batches.begin(), batches.end(), [&](const auto& current) {
+                const auto& first = current.descriptors.front();
+                return first.source_tier == descriptor.source_tier && first.target_tier == descriptor.target_tier
+                    && first.group_set_id == descriptor.group_set_id;
+            });
         }
-        return group_sets_[descriptor.group_set_id]->diskPool().get();
-    };
-    std::vector<std::vector<TransferDescriptor>> batches;
-    for (const auto& descriptor : descriptors) {
-        auto batch = std::find_if(batches.begin(), batches.end(), [&](const auto& current) {
-            return current.front().source_tier == descriptor.source_tier
-                && current.front().target_tier == descriptor.target_tier
-                && disk_pool(current.front()) == disk_pool(descriptor);
-        });
         if (batch == batches.end()) {
-            batches.push_back({descriptor});
+            batches.push_back(TransferBatch{{descriptor}, {descriptor_index}});
         } else {
-            batch->push_back(descriptor);
+            batch->descriptors.push_back(descriptor);
+            batch->descriptor_indices.push_back(descriptor_index);
         }
     }
     return batches;
