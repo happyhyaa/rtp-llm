@@ -274,6 +274,10 @@ bool BlockTreeCache::getDeviceBlockDebugInfo(size_t                group_id,
     return true;
 }
 
+void BlockTreeCache::waitForPendingTasks() {
+    task_pool_->waitForIdle();
+}
+
 void BlockTreeCache::onBlocksReleased(const std::vector<BlockReleaseReceipt>& receipts) {
     std::lock_guard<std::mutex> lock(mutex_);
     struct DirtyResource {
