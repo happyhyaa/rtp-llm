@@ -43,9 +43,12 @@ bool StoreTaskRunner::runTransfer(Task&                          task,
     const int     timeout_ms = task.target_tier == Tier::DISK ? disk_timeout_ms : host_timeout_ms;
     const int64_t transfer_begin_time_us =
         metrics_reporter.reportTransferStarted(CacheTransferOperation::STORE, Tier::DEVICE, task.target_tier);
-    BlockTreeTransferBytes transfer_bytes;
-    bool                   copy_success   = false;
-    const auto             finish_metrics = [&]() {
+    bool       copy_success   = false;
+    const auto finish_metrics = [&]() {
+        BlockTreeTransferBytes transfer_bytes;
+        if (copy_success) {
+            metrics_reporter.accumulateTransferBytes(task.descriptors, group_sets_, transfer_bytes);
+        }
         metrics_reporter.reportTransferFinished(CacheTransferOperation::STORE,
                                                 Tier::DEVICE,
                                                 task.target_tier,
@@ -68,9 +71,6 @@ bool StoreTaskRunner::runTransfer(Task&                          task,
         FusedAsyncContext context(contexts);
         context.waitDone();
         copy_success = context.success();
-        if (copy_success) {
-            metrics_reporter.accumulateTransferBytes(task.descriptors, group_sets_, transfer_bytes);
-        }
         finish_metrics();
         return copy_success;
     } catch (...) {

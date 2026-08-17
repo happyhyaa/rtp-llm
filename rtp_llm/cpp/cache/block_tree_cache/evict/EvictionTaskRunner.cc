@@ -26,6 +26,14 @@ EvictionTaskResult EvictionTaskRunner::runTransfer(const EvictionTask&          
             return;
         }
         transfer_started = false;
+        if (task_result.primary_success) {
+            metrics_reporter.accumulateTransferBytes({task.primary_desc}, group_sets_, transfer_bytes);
+        }
+        for (size_t i = 0; i < task_result.cascade_success.size(); ++i) {
+            if (task_result.cascade_success[i]) {
+                metrics_reporter.accumulateTransferBytes({task.cascade_descs[i]}, group_sets_, transfer_bytes);
+            }
+        }
         metrics_reporter.reportTransferFinished(CacheTransferOperation::EVICT,
                                                 task.primary_desc.source_tier,
                                                 task.primary_desc.target_tier,
@@ -51,9 +59,7 @@ EvictionTaskResult EvictionTaskRunner::runTransfer(const EvictionTask&          
             transfer_dispatcher_->executeMultiRank({task.primary_desc}, transfer_timeout_ms);
         primary_context->waitDone();
         task_result.primary_success = primary_context->success();
-        if (task_result.primary_success) {
-            metrics_reporter.accumulateTransferBytes({task.primary_desc}, group_sets_, transfer_bytes);
-        } else {
+        if (!task_result.primary_success) {
             task_result.cascade_success.assign(task.cascade_descs.size(), false);
             finish_metrics();
             return task_result;
@@ -67,9 +73,6 @@ EvictionTaskResult EvictionTaskRunner::runTransfer(const EvictionTask&          
             const bool cascade_success = cascade_context->success();
             task_result.cascade_success.push_back(cascade_success);
             overall_success = overall_success && cascade_success;
-            if (cascade_success) {
-                metrics_reporter.accumulateTransferBytes({cascade_desc}, group_sets_, transfer_bytes);
-            }
         }
         finish_metrics();
         return task_result;

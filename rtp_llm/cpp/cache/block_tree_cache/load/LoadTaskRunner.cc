@@ -56,6 +56,10 @@ bool LoadTaskRunner::runTransfer(Task&                          task,
     bool                   disk_success = false;
     const auto finish_metrics = [&](bool host_success, bool disk_success) {
         if (host_transfer_started) {
+            if (host_success) {
+                metrics_reporter.accumulateTransferBytes(
+                    task.host_to_device_descriptors, group_sets_, host_transfer_bytes);
+            }
             host_transfer_started = false;
             metrics_reporter.reportTransferFinished(CacheTransferOperation::LOAD,
                                                     Tier::HOST,
@@ -66,6 +70,10 @@ bool LoadTaskRunner::runTransfer(Task&                          task,
                                                     host_transfer_bytes);
         }
         if (disk_transfer_started) {
+            if (disk_success) {
+                metrics_reporter.accumulateTransferBytes(
+                    task.disk_to_device_descriptors, group_sets_, disk_transfer_bytes);
+            }
             disk_transfer_started = false;
             metrics_reporter.reportTransferFinished(CacheTransferOperation::LOAD,
                                                     Tier::DISK,
@@ -98,9 +106,6 @@ bool LoadTaskRunner::runTransfer(Task&                          task,
             host_transfer_started = true;
         }
         host_success = execute_batches(host_batches, host_timeout_ms);
-        if (host_success) {
-            metrics_reporter.accumulateTransferBytes(task.host_to_device_descriptors, group_sets_, host_transfer_bytes);
-        }
         finish_metrics(host_success, false);
         if (!host_success) {
             return false;
@@ -112,10 +117,6 @@ bool LoadTaskRunner::runTransfer(Task&                          task,
             disk_transfer_started = true;
         }
         disk_success = execute_batches(disk_batches, disk_timeout_ms);
-        if (disk_success) {
-            metrics_reporter.accumulateTransferBytes(
-                task.disk_to_device_descriptors, group_sets_, disk_transfer_bytes);
-        }
         finish_metrics(host_success, disk_success);
         return disk_success;
     } catch (...) {
