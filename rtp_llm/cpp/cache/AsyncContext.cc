@@ -13,6 +13,12 @@ CompletedAsyncContext::CompletedAsyncContext(ErrorInfo error_info): error_info_(
 
 void CompletedAsyncContext::waitDone() {}
 
+void CompletedAsyncContext::onDone(DoneCallback callback) {
+    if (callback) {
+        callback(error_info_);
+    }
+}
+
 bool CompletedAsyncContext::done() const {
     return true;
 }
@@ -38,6 +44,52 @@ void FusedAsyncContext::waitDone() {
         }
     }
     RTP_LLM_LOG_DEBUG("fused async context wait done, success: %d", success());
+}
+
+void FusedAsyncContext::onDone(DoneCallback callback) {
+    if (!callback) {
+        return;
+    }
+    size_t remaining = 0;
+    for (const auto& context : contexts_) {
+        remaining += context != nullptr;
+    }
+    if (remaining == 0) {
+        callback(ErrorInfo::OkStatus());
+        return;
+    }
+
+    struct CallbackState {
+        std::mutex   mutex;
+        size_t       remaining{0};
+        ErrorInfo    first_error{ErrorInfo::OkStatus()};
+        DoneCallback callback;
+    };
+    auto state       = std::make_shared<CallbackState>();
+    state->remaining = remaining;
+    state->callback  = std::move(callback);
+    for (const auto& context : contexts_) {
+        if (!context) {
+            continue;
+        }
+        context->onDone([state](ErrorInfo error) mutable {
+            DoneCallback callback;
+            ErrorInfo    result = ErrorInfo::OkStatus();
+            {
+                std::lock_guard<std::mutex> lock(state->mutex);
+                if (!error.ok() && state->first_error.ok()) {
+                    state->first_error = std::move(error);
+                }
+                if (--state->remaining == 0) {
+                    result   = state->first_error;
+                    callback = std::move(state->callback);
+                }
+            }
+            if (callback) {
+                callback(std::move(result));
+            }
+        });
+    }
 }
 
 bool FusedAsyncContext::done() const {
@@ -81,9 +133,40 @@ void FusedAsyncReadContext::waitDone() {
     done_cv_.wait(lock, [&] { return done(); });
 }
 
+void FusedAsyncReadContext::onDone(DoneCallback callback) {
+    if (!callback) {
+        return;
+    }
+    bool      run_now = false;
+    ErrorInfo error   = ErrorInfo::OkStatus();
+    {
+        std::lock_guard<std::mutex> lock(callback_mutex_);
+        if (done()) {
+            run_now = true;
+            error   = errorInfo();
+        } else {
+            callbacks_.push_back(std::move(callback));
+        }
+    }
+    if (run_now) {
+        callback(std::move(error));
+    }
+}
+
 void FusedAsyncReadContext::notifyDone() {
-    std::lock_guard<std::mutex> lock(done_mutex_);
     done_cv_.notify_all();
+    std::vector<DoneCallback> callbacks;
+    ErrorInfo                 error = ErrorInfo::OkStatus();
+    {
+        std::lock_guard<std::mutex> lock(callback_mutex_);
+        if (done()) {
+            error = errorInfo();
+            callbacks.swap(callbacks_);
+        }
+    }
+    for (auto& callback : callbacks) {
+        callback(error);
+    }
 }
 
 bool FusedAsyncReadContext::done() const {

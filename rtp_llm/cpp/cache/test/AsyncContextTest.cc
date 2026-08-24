@@ -8,6 +8,7 @@
 #include <chrono>
 #include <mutex>
 #include <thread>
+#include <utility>
 
 namespace rtp_llm {
 namespace test {
@@ -17,11 +18,20 @@ namespace {
 class BlockingAsyncContext final: public AsyncContext {
 public:
     void setDone(bool done) {
+        std::vector<DoneCallback> callbacks;
         {
             std::lock_guard<std::mutex> lk(mu_);
             done_ = done;
+            if (done_) {
+                callbacks.swap(callbacks_);
+            }
         }
         cv_.notify_all();
+        for (auto& callback : callbacks) {
+            callback(success_.load(std::memory_order_relaxed) ?
+                         ErrorInfo::OkStatus() :
+                         ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "blocking context failed"));
+        }
     }
 
     void setSuccess(bool success) {
@@ -31,6 +41,25 @@ public:
     void waitDone() override {
         std::unique_lock<std::mutex> lk(mu_);
         cv_.wait(lk, [&] { return done_; });
+    }
+
+    void onDone(DoneCallback callback) override {
+        if (!callback) {
+            return;
+        }
+        bool run_now = false;
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            if (done_) {
+                run_now = true;
+            } else {
+                callbacks_.push_back(std::move(callback));
+            }
+        }
+        if (run_now) {
+            callback(success() ? ErrorInfo::OkStatus() :
+                                 ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "blocking context failed"));
+        }
     }
 
     bool done() const override {
@@ -47,6 +76,7 @@ private:
     mutable std::condition_variable cv_;
     bool                            done_{false};
     std::atomic<bool>               success_{true};
+    std::vector<DoneCallback>       callbacks_;
 };
 
 }  // namespace
@@ -76,6 +106,18 @@ TEST(AsyncContextTest, CompletedAsyncContext_FailureStatusPreservesErrorInfo) {
     EXPECT_FALSE(context.success());
     EXPECT_EQ(context.errorInfo().code(), ErrorCode::INVALID_PARAMS);
     EXPECT_EQ(context.errorInfo().ToString(), "invalid block transfer request");
+}
+
+TEST(AsyncContextTest, CompletedAsyncContext_OnDoneRunsImmediately) {
+    CompletedAsyncContext context(ErrorInfo(ErrorCode::INVALID_PARAMS, "already done"));
+    size_t                callback_count = 0;
+
+    context.onDone([&](ErrorInfo error) {
+        EXPECT_EQ(error.code(), ErrorCode::INVALID_PARAMS);
+        ++callback_count;
+    });
+
+    EXPECT_EQ(callback_count, 1u);
 }
 
 TEST(AsyncContextTest, FusedAsyncContext_DoneTrue_WhenEmptyOrAllDoneOrNull) {
@@ -116,6 +158,26 @@ TEST(AsyncContextTest, FusedAsyncContext_SuccessFalse_WhenAnyFail) {
 
     FusedAsyncContext fused({ok, bad});
     EXPECT_FALSE(fused.success());
+}
+
+TEST(AsyncContextTest, FusedAsyncContext_OnDoneWaitsForAllChildrenAndKeepsFirstError) {
+    auto first  = std::make_shared<BlockingAsyncContext>();
+    auto second = std::make_shared<BlockingAsyncContext>();
+    first->setSuccess(false);
+    FusedAsyncContext fused({first, second});
+
+    size_t    callback_count = 0;
+    ErrorCode result_code    = ErrorCode::NONE_ERROR;
+    fused.onDone([&](ErrorInfo error) {
+        result_code = error.code();
+        ++callback_count;
+    });
+
+    first->setDone(true);
+    EXPECT_EQ(callback_count, 0u);
+    second->setDone(true);
+    EXPECT_EQ(callback_count, 1u);
+    EXPECT_EQ(result_code, ErrorCode::EXECUTION_EXCEPTION);
 }
 
 TEST(AsyncContextTest, FusedAsyncReadContext_DoneTrue_WhenMatchContextNull) {

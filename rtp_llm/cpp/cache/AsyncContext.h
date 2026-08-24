@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <vector>
@@ -14,11 +15,14 @@ class KVCacheResource;
 
 class AsyncContext {
 public:
+    using DoneCallback = std::function<void(ErrorInfo)>;
+
     AsyncContext()          = default;
     virtual ~AsyncContext() = default;
 
 public:
     virtual void      waitDone()      = 0;
+    virtual void      onDone(DoneCallback callback) = 0;
     virtual bool      done() const    = 0;
     virtual bool      success() const = 0;
     virtual ErrorInfo errorInfo() const {
@@ -33,6 +37,7 @@ public:
     ~CompletedAsyncContext() override = default;
 
     void      waitDone() override;
+    void      onDone(DoneCallback callback) override;
     bool      done() const override;
     bool      success() const override;
     ErrorInfo errorInfo() const override;
@@ -56,6 +61,7 @@ public:
 
 public:
     void      waitDone() override;
+    void      onDone(DoneCallback callback) override;
     bool      done() const override;
     bool      success() const override;
     ErrorInfo errorInfo() const override;
@@ -79,6 +85,7 @@ public:
     bool      success() const override;
     ErrorInfo errorInfo() const override;
     void      waitDone() override;
+    void      onDone(DoneCallback callback) override;
     void      notifyDone();
     // NOTE: `setFusedReadContext()` must be called eventually to avoid blocking waitDone() on the read stage.
     void setFusedReadContext(const std::shared_ptr<FusedAsyncContext>& fused_read_context);
@@ -96,6 +103,8 @@ private:
 
     std::mutex              done_mutex_;
     std::condition_variable done_cv_;
+    mutable std::mutex      callback_mutex_;
+    std::vector<DoneCallback> callbacks_;
 };
 
 }  // namespace rtp_llm

@@ -23,7 +23,7 @@ public:
                                HostDiskTransferExecutor&       host_disk_executor,
                                const std::vector<GroupSetPtr>& group_sets,
                                size_t                          staging_block_count,
-                               size_t                          transfer_worker_count = 1);
+                               BlockTreeTaskPool&              transfer_task_pool);
     ~DeviceDiskTransferExecutor();
 
     DeviceDiskTransferExecutor(const DeviceDiskTransferExecutor&)            = delete;
@@ -34,6 +34,8 @@ public:
 
     TransferStatus execute(const TransferDescriptor& descriptor, const GroupSet& group_set);
 
+    void cancelPendingTransfers();
+
     void resetBenchmarkTimingStats();
     std::atomic<int64_t> benchmark_queue_wait_ns_{0};
     std::atomic<int64_t> benchmark_executor_ns_{0};
@@ -41,17 +43,15 @@ public:
 
 private:
     HostStagingBlockPool* stagingPool(CacheGroupType group_type) const;
-    BlockTreeTaskPool*    taskPool(CacheGroupType group_type) const;
     size_t                batchCapacity(CacheGroupType group_type) const;
 
-    DeviceHostTransferExecutor&        device_host_executor_;
-    HostDiskTransferExecutor&          host_disk_executor_;
+    DeviceHostTransferExecutor&          device_host_executor_;
+    HostDiskTransferExecutor&            host_disk_executor_;
+    BlockTreeTaskPool&                    transfer_task_pool_;
     std::unique_ptr<HostStagingBlockPool> full_staging_pool_;
     std::unique_ptr<HostStagingBlockPool> swa_staging_pool_;
-    std::unique_ptr<BlockTreeTaskPool> full_task_pool_;
-    std::unique_ptr<BlockTreeTaskPool> swa_task_pool_;
-    size_t                            full_batch_capacity_{0};
-    size_t                            swa_batch_capacity_{0};
+    size_t                                full_batch_capacity_{0};
+    size_t                                swa_batch_capacity_{0};
 };
 
 }  // namespace rtp_llm

@@ -3,6 +3,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <cstddef>
+#include <deque>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -24,10 +25,22 @@ public:
 
     bool start();
     bool submit(std::function<void()> task);
+    bool submitCompletion(std::function<void()> task);
+    bool acquireBusinessCredit();
+    void releaseBusinessCredit();
+    void stopAdmission();
     void waitForIdle();
     void shutdown();
 
+    size_t completionTaskSubmittedCount() const {
+        return completion_tasks_submitted_.load(std::memory_order_relaxed);
+    }
+    size_t completionQueuePeakDepth() const {
+        return completion_queue_peak_depth_.load(std::memory_order_relaxed);
+    }
+
 private:
+    void workerLoop();
     void taskStarted();
     void taskFinished();
 
@@ -37,10 +50,17 @@ private:
 
     std::shared_ptr<autil::LockFreeThreadPool> thread_pool_;
     std::mutex                                 lifecycle_mutex_;
+    std::condition_variable                   queue_cv_;
+    std::deque<std::function<void()>>          normal_queue_;
+    std::deque<std::function<void()>>          completion_queue_;
     bool                                       started_{false};
+    bool                                       admission_stopped_{false};
     bool                                       shutdown_{false};
 
     std::atomic<int>        pending_tasks_{0};
+    std::atomic<size_t>     business_credits_{0};
+    std::atomic<size_t>     completion_tasks_submitted_{0};
+    std::atomic<size_t>     completion_queue_peak_depth_{0};
     std::mutex              wait_mutex_;
     std::condition_variable wait_cv_;
     std::function<void()>   pending_task_wait_observer_for_test_;

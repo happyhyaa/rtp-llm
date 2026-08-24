@@ -59,6 +59,7 @@ public:
     bool completeOne(bool success);
     bool onTaskFail();
     void waitDone() override;
+    void onDone(DoneCallback callback) override;
     bool done() const override;
     bool success() const override;
 
@@ -69,6 +70,7 @@ private:
     void onBackendRead(bool success);
     void failBeforeCommit();
     void finishIfReadyLocked(bool& notify);
+    void notifyCompletion();
 
     std::shared_ptr<LoadContextCoordinator> coordinator_;
     const uint64_t                          context_id_;
@@ -94,6 +96,7 @@ private:
     std::condition_variable cv_;
     size_t                  remaining_transfer_count_{0};
     bool                    has_failure_{false};
+    std::vector<DoneCallback> callbacks_;
 };
 
 class LoadContextCoordinator: public std::enable_shared_from_this<LoadContextCoordinator> {

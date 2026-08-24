@@ -186,7 +186,7 @@ void LoadAsyncContext::onBackendRead(bool success) {
         finishIfReadyLocked(notify);
     }
     if (notify) {
-        cv_.notify_all();
+        notifyCompletion();
     }
 }
 
@@ -206,7 +206,7 @@ bool LoadAsyncContext::commit() {
         finishIfReadyLocked(notify);
     }
     if (notify) {
-        cv_.notify_all();
+        notifyCompletion();
     }
     return true;
 }
@@ -222,7 +222,7 @@ void LoadAsyncContext::markAborted() {
         backend_pending_          = false;
         state_.store(State::FAILED);
     }
-    cv_.notify_all();
+    notifyCompletion();
 }
 
 bool LoadAsyncContext::abortPending() {
@@ -247,7 +247,7 @@ bool LoadAsyncContext::completeOne(bool success) {
         finishIfReadyLocked(notify);
     }
     if (notify) {
-        cv_.notify_all();
+        notifyCompletion();
     }
     return true;
 }
@@ -263,7 +263,7 @@ bool LoadAsyncContext::onTaskFail() {
         backend_pending_          = false;
         state_.store(State::FAILED);
     }
-    cv_.notify_all();
+    notifyCompletion();
     return true;
 }
 
@@ -282,6 +282,44 @@ void LoadAsyncContext::finishIfReadyLocked(bool& notify) {
 void LoadAsyncContext::waitDone() {
     std::unique_lock<std::mutex> lock(mutex_);
     cv_.wait(lock, [this] { return done(); });
+}
+
+void LoadAsyncContext::onDone(DoneCallback callback) {
+    if (!callback) {
+        return;
+    }
+    bool      run_now = false;
+    ErrorInfo error   = ErrorInfo::OkStatus();
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (done()) {
+            run_now = true;
+            if (!success()) {
+                error = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "load async context failed");
+            }
+        } else {
+            callbacks_.push_back(std::move(callback));
+        }
+    }
+    if (run_now) {
+        callback(std::move(error));
+    }
+}
+
+void LoadAsyncContext::notifyCompletion() {
+    std::vector<DoneCallback> callbacks;
+    ErrorInfo                 error = ErrorInfo::OkStatus();
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!success()) {
+            error = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "load async context failed");
+        }
+        callbacks.swap(callbacks_);
+    }
+    cv_.notify_all();
+    for (auto& callback : callbacks) {
+        callback(error);
+    }
 }
 
 bool LoadAsyncContext::done() const {

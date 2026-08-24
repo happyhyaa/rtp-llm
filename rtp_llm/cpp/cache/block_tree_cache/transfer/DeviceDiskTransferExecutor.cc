@@ -10,6 +10,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/DeviceHostTransferExecutor.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/HostDiskTransferExecutor.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferBatchAsyncContext.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferStageState.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
@@ -18,7 +19,6 @@ namespace rtp_llm {
 namespace {
 
 constexpr std::chrono::milliseconds kStagingAcquireTimeout{1000};
-constexpr size_t                    kLaneQueueSize   = 10000;
 
 size_t alignedStride(size_t payload_bytes) {
     const size_t alignment = HostStagingBlockPool::kAlignment;
@@ -50,10 +50,11 @@ DeviceDiskTransferExecutor::DeviceDiskTransferExecutor(DeviceHostTransferExecuto
                                                        HostDiskTransferExecutor&       host_disk_executor,
                                                        const std::vector<GroupSetPtr>& group_sets,
                                                        size_t                          staging_block_count,
-                                                       size_t                          transfer_worker_count):
-    device_host_executor_(device_host_executor), host_disk_executor_(host_disk_executor) {
+                                                       BlockTreeTaskPool&              transfer_task_pool):
+    device_host_executor_(device_host_executor),
+    host_disk_executor_(host_disk_executor),
+    transfer_task_pool_(transfer_task_pool) {
     RTP_LLM_CHECK(staging_block_count >= 2 && staging_block_count % 2 == 0);
-    RTP_LLM_CHECK(transfer_worker_count > 0);
 
     size_t max_stride  = 0;
     size_t full_stride = 0;
@@ -81,96 +82,124 @@ DeviceDiskTransferExecutor::DeviceDiskTransferExecutor(DeviceHostTransferExecuto
 
     full_staging_pool_ = std::make_unique<HostStagingBlockPool>(full_batch_capacity_, full_stride);
     swa_staging_pool_  = std::make_unique<HostStagingBlockPool>(swa_batch_capacity_, swa_stride);
-    full_task_pool_ =
-        std::make_unique<BlockTreeTaskPool>(transfer_worker_count, kLaneQueueSize, "BlockDisk2DeviceFull");
-    swa_task_pool_ =
-        std::make_unique<BlockTreeTaskPool>(transfer_worker_count, kLaneQueueSize, "BlockDisk2DeviceSwa");
-    RTP_LLM_CHECK(full_task_pool_->start());
-    RTP_LLM_CHECK(swa_task_pool_->start());
 }
 
 DeviceDiskTransferExecutor::~DeviceDiskTransferExecutor() {
-    full_task_pool_->shutdown();
-    swa_task_pool_->shutdown();
+    cancelPendingTransfers();
+}
+
+void DeviceDiskTransferExecutor::cancelPendingTransfers() {
+    full_staging_pool_->cancelAllBatchWaiters();
+    swa_staging_pool_->cancelAllBatchWaiters();
 }
 
 std::shared_ptr<AsyncContext>
 DeviceDiskTransferExecutor::execute(const std::vector<TransferDescriptor>& descriptors,
                                     const std::vector<const GroupSet*>&    group_sets) {
     auto context = std::make_shared<TransferBatchAsyncContext>();
+    if (descriptors.empty() || descriptors.size() != group_sets.size()) {
+        context->complete(ErrorInfo(ErrorCode::INVALID_PARAMS, "invalid disk-to-device batch"));
+        return context;
+    }
     const CacheGroupType group_type = group_sets.front()->groupType();
+    if (std::any_of(group_sets.begin(), group_sets.end(), [group_type](const GroupSet* group_set) {
+            return group_set == nullptr || group_set->groupType() != group_type;
+        })) {
+        context->complete(ErrorInfo(ErrorCode::INVALID_PARAMS, "mixed disk-to-device cache group types"));
+        return context;
+    }
     HostStagingBlockPool* pool      = stagingPool(group_type);
-    BlockTreeTaskPool* task_pool    = taskPool(group_type);
     const size_t capacity           = batchCapacity(group_type);
-    if (pool == nullptr || task_pool == nullptr || capacity == 0) {
+    if (pool == nullptr || capacity == 0) {
         context->complete(ErrorInfo(ErrorCode::INVALID_PARAMS, "unsupported disk-to-device cache group type"));
         return context;
     }
 
-    const auto enqueue_time = std::chrono::steady_clock::now();
-    const bool accepted = task_pool->submit([this, descriptors, group_sets, context, pool, capacity, enqueue_time] {
-        const auto executor_start = std::chrono::steady_clock::now();
-        benchmark_queue_wait_ns_.fetch_add(
-            std::chrono::duration_cast<std::chrono::nanoseconds>(executor_start - enqueue_time).count(),
-            std::memory_order_relaxed);
-        const auto record_executor = [this, executor_start] {
-            benchmark_executor_ns_.fetch_add(
-                std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()
-                                                                    - executor_start).count(),
-                std::memory_order_relaxed);
-            benchmark_executor_count_.fetch_add(1, std::memory_order_relaxed);
-        };
-        try {
-            for (size_t begin = 0; begin < descriptors.size(); begin += capacity) {
-                const size_t end = std::min(begin + capacity, descriptors.size());
-                std::vector<HostStagingBlockPool::HostStagingBlockLease> leases;
-                std::vector<HostBufferView>                              hosts;
-                leases.reserve(end - begin);
-                hosts.reserve(end - begin);
-                for (size_t index = begin; index < end; ++index) {
-                    auto lease = pool->mallocWithBackoff(kStagingAcquireTimeout);
-                    if (!lease.has_value()) {
+    auto stage_state = std::make_shared<TransferStageState>(
+        [context](ErrorInfo error) { context->complete(std::move(error)); });
+    for (size_t begin = 0; begin < descriptors.size(); begin += capacity) {
+        const size_t end = std::min(begin + capacity, descriptors.size());
+        std::vector<TransferDescriptor> sub_descriptors(descriptors.begin() + begin, descriptors.begin() + end);
+        std::vector<const GroupSet*> sub_group_sets(group_sets.begin() + begin, group_sets.begin() + end);
+        stage_state->addBatch();
+        pool->requestBatch(end - begin,
+                           [this,
+                            stage_state,
+                            sub_descriptors = std::move(sub_descriptors),
+                            sub_group_sets = std::move(sub_group_sets),
+                            begin,
+                            end](std::optional<HostStagingBlockPool::HostStagingBlockBatch> leases) mutable {
+            if (!leases.has_value()) {
+                stage_state->completeBatch(ErrorInfo(
+                    ErrorCode::EXECUTION_EXCEPTION,
+                    "disk-to-device staging admission cancelled, descriptor_range=[" + std::to_string(begin) + ","
+                        + std::to_string(end) + ")"));
+                return;
+            }
+
+            auto batch_leases = std::make_shared<HostStagingBlockPool::HostStagingBlockBatch>(std::move(*leases));
+            const auto enqueue_time = std::chrono::steady_clock::now();
+            const bool accepted = transfer_task_pool_.submit(
+                [this,
+                 stage_state,
+                 sub_descriptors = std::move(sub_descriptors),
+                 sub_group_sets = std::move(sub_group_sets),
+                 batch_leases = std::move(batch_leases),
+                 enqueue_time,
+                 begin,
+                 end] {
+                const auto executor_start = std::chrono::steady_clock::now();
+                benchmark_queue_wait_ns_.fetch_add(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(executor_start - enqueue_time).count(),
+                    std::memory_order_relaxed);
+                const auto record_executor = [this, executor_start] {
+                    benchmark_executor_ns_.fetch_add(
+                        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()
+                                                                            - executor_start).count(),
+                        std::memory_order_relaxed);
+                    benchmark_executor_count_.fetch_add(1, std::memory_order_relaxed);
+                };
+                try {
+                    std::vector<HostBufferView> hosts;
+                    hosts.reserve(batch_leases->size());
+                    for (size_t index = 0; index < batch_leases->size(); ++index) {
+                        hosts.push_back((*batch_leases)[index].blockBuffer(sub_group_sets[index]->payloadBytes()));
+                    }
+
+                    TransferStatus status = host_disk_executor_.execute(hosts, sub_descriptors, sub_group_sets);
+                    if (status != TransferStatus::OK) {
+                        logBatchFailure(sub_descriptors, begin, "disk-to-staging");
                         record_executor();
-                        context->complete(transferError(TransferStatus::RESOURCE_EXHAUSTED, begin, end));
+                        stage_state->completeBatch(transferError(status, begin, end));
                         return;
                     }
-                    hosts.push_back(lease->blockBuffer(group_sets[index]->payloadBytes()));
-                    leases.push_back(std::move(*lease));
-                }
-
-                const std::vector<TransferDescriptor> sub_descriptors(descriptors.begin() + begin,
-                                                                      descriptors.begin() + end);
-                const std::vector<const GroupSet*> sub_group_sets(group_sets.begin() + begin,
-                                                                  group_sets.begin() + end);
-                TransferStatus status = host_disk_executor_.execute(hosts, sub_descriptors, sub_group_sets);
-                if (status != TransferStatus::OK) {
-                    logBatchFailure(sub_descriptors, begin, "disk-to-staging");
+                    status = device_host_executor_.execute(hosts, sub_descriptors, sub_group_sets);
+                    if (status != TransferStatus::OK) {
+                        logBatchFailure(sub_descriptors, begin, "staging-to-device");
+                        record_executor();
+                        stage_state->completeBatch(transferError(status, begin, end));
+                        return;
+                    }
                     record_executor();
-                    context->complete(transferError(status, begin, end));
-                    return;
-                }
-                status = device_host_executor_.execute(hosts, sub_descriptors, sub_group_sets);
-                if (status != TransferStatus::OK) {
-                    logBatchFailure(sub_descriptors, begin, "staging-to-device");
+                    stage_state->completeBatch(ErrorInfo::OkStatus());
+                } catch (const std::exception& error) {
                     record_executor();
-                    context->complete(transferError(status, begin, end));
-                    return;
+                    stage_state->completeBatch(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, error.what()));
+                } catch (...) {
+                    record_executor();
+                    stage_state->completeBatch(
+                        ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "unknown disk-to-device exception"));
                 }
+            });
+            if (!accepted) {
+                stage_state->completeBatch(ErrorInfo(
+                    ErrorCode::EXECUTION_EXCEPTION,
+                    "RESOURCE_EXHAUSTED: disk-to-device queue is full or stopped, descriptor_range=["
+                        + std::to_string(begin) + "," + std::to_string(end) + ")"));
             }
-            record_executor();
-            context->complete(ErrorInfo::OkStatus());
-        } catch (const std::exception& error) {
-            record_executor();
-            context->complete(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, error.what()));
-        } catch (...) {
-            record_executor();
-            context->complete(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "unknown disk-to-device exception"));
-        }
-    });
-    if (!accepted) {
-        context->complete(
-            ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "RESOURCE_EXHAUSTED: disk-to-device queue is full or stopped"));
+        });
     }
+    stage_state->finishSubmitting();
     return context;
 }
 
@@ -207,16 +236,6 @@ HostStagingBlockPool* DeviceDiskTransferExecutor::stagingPool(CacheGroupType gro
     }
     if (group_type == CacheGroupType::SWA) {
         return swa_staging_pool_.get();
-    }
-    return nullptr;
-}
-
-BlockTreeTaskPool* DeviceDiskTransferExecutor::taskPool(CacheGroupType group_type) const {
-    if (group_type == CacheGroupType::FULL) {
-        return full_task_pool_.get();
-    }
-    if (group_type == CacheGroupType::SWA) {
-        return swa_task_pool_.get();
     }
     return nullptr;
 }
