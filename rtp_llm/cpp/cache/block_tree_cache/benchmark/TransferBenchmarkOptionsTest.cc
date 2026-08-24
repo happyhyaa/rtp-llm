@@ -32,6 +32,16 @@ TEST(TransferBenchmarkOptionsTest, CudaBatchSerializationDefaultsToEnabled) {
     EXPECT_TRUE(options.cuda_batch_serialize);
 }
 
+TEST(TransferBenchmarkOptionsTest, TransferWorkerCountDefaultsToOneForExplicitGridControl) {
+    const auto options = parseOptions({});
+    EXPECT_EQ(options.transfer_worker_count, 1u);
+}
+
+TEST(TransferBenchmarkOptionsTest, ParsesExplicitTransferWorkerCount) {
+    const auto options = parseOptions({"--transfer-worker-count", "7"});
+    EXPECT_EQ(options.transfer_worker_count, 7u);
+}
+
 TEST(TransferBenchmarkOptionsTest, ParsesEnabledCudaBatchSerializationSwitch) {
     const auto options = parseOptions({"--cuda-batch-serialize=1"});
     EXPECT_TRUE(options.cuda_batch_serialize);

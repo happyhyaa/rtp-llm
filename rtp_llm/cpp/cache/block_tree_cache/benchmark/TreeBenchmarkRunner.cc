@@ -244,6 +244,14 @@ public:
         return static_cast<size_t>(cache_.task_pool_->pending_tasks_.load());
     }
 
+    size_t completionTaskSubmittedCount() const {
+        return cache_.task_pool_->completionTaskSubmittedCount();
+    }
+
+    size_t completionQueuePeakDepth() const {
+        return cache_.task_pool_->completionQueuePeakDepth();
+    }
+
 private:
     static void appendRequestBlocks(const GroupSetPtr&             group_set,
                                     const BlockIndicesType&        blocks,
@@ -556,6 +564,10 @@ bool TreeBenchmarkRunner::runOnlineBenchmark(const OnlineTreeWorkloadConfig& con
     writer_.addResolvedConfigInt("warmup_seconds", static_cast<int64_t>(config.warmup_seconds));
     writer_.addResolvedConfigInt("measured_seconds", static_cast<int64_t>(config.measured_seconds));
     writer_.addResolvedConfigInt("task_pool_size_resolved", static_cast<int64_t>(options_.task_pool_size));
+    writer_.addResolvedConfigInt(
+        "shared_transfer_worker_count", static_cast<int64_t>(BlockTreeCacheConfig{}.transfer_worker_count));
+    writer_.addResolvedConfig("completion_queue_policy", "unbounded_priority_fifo");
+    writer_.addResolvedConfig("completion_queue_usage_metrics", "tasks_submitted,peak_depth");
     writer_.addResolvedConfigInt("foreground_scheduler_threads", 1);
     writer_.addResolvedConfigInt("repetition_identity", static_cast<int64_t>(repetition_id_));
     writer_.addResolvedConfigInt("cuda_device_resolved", static_cast<int64_t>(cuda_device_));
@@ -734,6 +746,10 @@ bool TreeBenchmarkRunner::runOnlineBenchmark(const OnlineTreeWorkloadConfig& con
     writer_.addMetric("logical_concurrency_resolved", static_cast<double>(config.logical_concurrency));
     writer_.addMetric("foreground_scheduler_threads", 1.0);
     writer_.addMetric("task_pool_size_resolved", static_cast<double>(options_.task_pool_size));
+    writer_.addMetric("completion_queue.tasks_submitted",
+                      static_cast<double>(adapter.completionTaskSubmittedCount()));
+    writer_.addMetric("completion_queue.peak_depth",
+                      static_cast<double>(adapter.completionQueuePeakDepth()));
     writer_.addMetric("active_requests_peak", static_cast<double>(m.active_requests_peak));
     writer_.addMetric("waiting_requests_peak", static_cast<double>(m.waiting_requests_peak));
     writer_.addMetric("loading_requests_peak", static_cast<double>(m.loading_requests_peak));
