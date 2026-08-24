@@ -35,12 +35,18 @@ public:
     int64_t benchmarkQueueWaitNs() const;
     int64_t benchmarkExecutorNs() const;
     size_t  benchmarkExecutorCount() const;
+    int64_t benchmarkTaskTotalLatencyNs() const;
+    int64_t benchmarkTaskTotalLatencyMaxNs() const;
+    size_t  benchmarkTaskTotalLatencyCount() const;
     size_t  transferWorkerCount() const {
         return transfer_worker_count_;
     }
     std::atomic<int64_t> benchmark_queue_wait_ns_{0};
     std::atomic<int64_t> benchmark_executor_ns_{0};
     std::atomic<size_t>  benchmark_executor_count_{0};
+    std::atomic<int64_t> benchmark_task_total_latency_ns_{0};
+    std::atomic<int64_t> benchmark_task_total_latency_max_ns_{0};
+    std::atomic<size_t>  benchmark_task_total_latency_count_{0};
 
 private:
     TransferStatus execute(const std::vector<HostBufferView>&       hosts,

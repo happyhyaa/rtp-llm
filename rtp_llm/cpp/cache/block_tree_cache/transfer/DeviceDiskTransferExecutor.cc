@@ -44,6 +44,22 @@ void logBatchFailure(const std::vector<TransferDescriptor>& descriptors, size_t 
     }
 }
 
+void recordTaskTotalLatency(std::atomic<int64_t>& total_ns,
+                       std::atomic<int64_t>& max_ns,
+                       std::atomic<size_t>&  count,
+                       std::chrono::steady_clock::time_point arrival_time) {
+    const int64_t duration_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                    std::chrono::steady_clock::now() - arrival_time)
+                                    .count();
+    total_ns.fetch_add(duration_ns, std::memory_order_relaxed);
+    count.fetch_add(1, std::memory_order_relaxed);
+    int64_t observed = max_ns.load(std::memory_order_relaxed);
+    while (observed < duration_ns
+           && !max_ns.compare_exchange_weak(
+               observed, duration_ns, std::memory_order_relaxed, std::memory_order_relaxed)) {
+    }
+}
+
 }  // namespace
 
 DeviceDiskTransferExecutor::DeviceDiskTransferExecutor(DeviceHostTransferExecutor&     device_host_executor,
@@ -121,15 +137,21 @@ DeviceDiskTransferExecutor::execute(const std::vector<TransferDescriptor>& descr
         const size_t end = std::min(begin + capacity, descriptors.size());
         std::vector<TransferDescriptor> sub_descriptors(descriptors.begin() + begin, descriptors.begin() + end);
         std::vector<const GroupSet*> sub_group_sets(group_sets.begin() + begin, group_sets.begin() + end);
+        const auto arrival_time = std::chrono::steady_clock::now();
         stage_state->addBatch();
         pool->requestBatch(end - begin,
                            [this,
                             stage_state,
                             sub_descriptors = std::move(sub_descriptors),
                             sub_group_sets = std::move(sub_group_sets),
+                            arrival_time,
                             begin,
                             end](std::optional<HostStagingBlockPool::HostStagingBlockBatch> leases) mutable {
             if (!leases.has_value()) {
+                recordTaskTotalLatency(benchmark_task_total_latency_ns_,
+                                  benchmark_task_total_latency_max_ns_,
+                                  benchmark_task_total_latency_count_,
+                                  arrival_time);
                 stage_state->completeBatch(ErrorInfo(
                     ErrorCode::EXECUTION_EXCEPTION,
                     "disk-to-device staging admission cancelled, descriptor_range=[" + std::to_string(begin) + ","
@@ -146,12 +168,19 @@ DeviceDiskTransferExecutor::execute(const std::vector<TransferDescriptor>& descr
                  sub_group_sets = std::move(sub_group_sets),
                  batch_leases = std::move(batch_leases),
                  enqueue_time,
+                 arrival_time,
                  begin,
                  end] {
                 const auto executor_start = std::chrono::steady_clock::now();
                 benchmark_queue_wait_ns_.fetch_add(
                     std::chrono::duration_cast<std::chrono::nanoseconds>(executor_start - enqueue_time).count(),
                     std::memory_order_relaxed);
+                const auto record_task_total_latency = [this, arrival_time] {
+                    recordTaskTotalLatency(benchmark_task_total_latency_ns_,
+                                      benchmark_task_total_latency_max_ns_,
+                                      benchmark_task_total_latency_count_,
+                                      arrival_time);
+                };
                 const auto record_executor = [this, executor_start] {
                     benchmark_executor_ns_.fetch_add(
                         std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()
@@ -170,6 +199,7 @@ DeviceDiskTransferExecutor::execute(const std::vector<TransferDescriptor>& descr
                     if (status != TransferStatus::OK) {
                         logBatchFailure(sub_descriptors, begin, "disk-to-staging");
                         record_executor();
+                        record_task_total_latency();
                         stage_state->completeBatch(transferError(status, begin, end));
                         return;
                     }
@@ -177,21 +207,29 @@ DeviceDiskTransferExecutor::execute(const std::vector<TransferDescriptor>& descr
                     if (status != TransferStatus::OK) {
                         logBatchFailure(sub_descriptors, begin, "staging-to-device");
                         record_executor();
+                        record_task_total_latency();
                         stage_state->completeBatch(transferError(status, begin, end));
                         return;
                     }
                     record_executor();
+                    record_task_total_latency();
                     stage_state->completeBatch(ErrorInfo::OkStatus());
                 } catch (const std::exception& error) {
                     record_executor();
+                    record_task_total_latency();
                     stage_state->completeBatch(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, error.what()));
                 } catch (...) {
                     record_executor();
+                    record_task_total_latency();
                     stage_state->completeBatch(
                         ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "unknown disk-to-device exception"));
                 }
             });
             if (!accepted) {
+                recordTaskTotalLatency(benchmark_task_total_latency_ns_,
+                                  benchmark_task_total_latency_max_ns_,
+                                  benchmark_task_total_latency_count_,
+                                  arrival_time);
                 stage_state->completeBatch(ErrorInfo(
                     ErrorCode::EXECUTION_EXCEPTION,
                     "RESOURCE_EXHAUSTED: disk-to-device queue is full or stopped, descriptor_range=["
@@ -207,6 +245,9 @@ void DeviceDiskTransferExecutor::resetBenchmarkTimingStats() {
     benchmark_queue_wait_ns_.store(0, std::memory_order_relaxed);
     benchmark_executor_ns_.store(0, std::memory_order_relaxed);
     benchmark_executor_count_.store(0, std::memory_order_relaxed);
+    benchmark_task_total_latency_ns_.store(0, std::memory_order_relaxed);
+    benchmark_task_total_latency_max_ns_.store(0, std::memory_order_relaxed);
+    benchmark_task_total_latency_count_.store(0, std::memory_order_relaxed);
 }
 
 TransferStatus DeviceDiskTransferExecutor::execute(const TransferDescriptor& descriptor,

@@ -167,6 +167,35 @@ TEST_F(PerRankBlockTransferEngineHostDiskTest, SubmitHostToDiskRoundTrip) {
     releasePoolBlock(*disk_pool_, disk_slot);
 }
 
+TEST_F(PerRankBlockTransferEngineHostDiskTest, TaskTotalLatencyCoversQueueAndExecutorUntilCompletion) {
+    const BlockIdxType host_block = poolMalloc(*host_pool_);
+    ASSERT_NE(host_block, NULL_BLOCK_IDX);
+    const BlockIdxType disk_block = poolMalloc(*disk_pool_);
+    ASSERT_NE(disk_block, NULL_BLOCK_IDX);
+
+    per_rank_transfer_engine_->resetBenchmarkTimingStats();
+    auto context = per_rank_transfer_engine_->submit(
+        {makeDescriptor(Tier::HOST, Tier::DISK, {}, host_block, disk_block)});
+    context->waitDone();
+    ASSERT_TRUE(context->success());
+
+    const int64_t total_latency_ns = per_rank_transfer_engine_->benchmarkTaskTotalLatencyNs();
+    EXPECT_EQ(per_rank_transfer_engine_->benchmarkTaskTotalLatencyCount(), 1u);
+    EXPECT_GT(total_latency_ns, 0);
+    EXPECT_EQ(per_rank_transfer_engine_->benchmarkTaskTotalLatencyMaxNs(), total_latency_ns);
+    EXPECT_GE(total_latency_ns,
+              per_rank_transfer_engine_->benchmarkQueueWaitNs()
+                  + per_rank_transfer_engine_->benchmarkExecutorNs());
+
+    per_rank_transfer_engine_->resetBenchmarkTimingStats();
+    EXPECT_EQ(per_rank_transfer_engine_->benchmarkTaskTotalLatencyCount(), 0u);
+    EXPECT_EQ(per_rank_transfer_engine_->benchmarkTaskTotalLatencyNs(), 0);
+    EXPECT_EQ(per_rank_transfer_engine_->benchmarkTaskTotalLatencyMaxNs(), 0);
+
+    releasePoolBlock(*host_pool_, host_block);
+    releasePoolBlock(*disk_pool_, disk_block);
+}
+
 TEST_F(PerRankBlockTransferEngineHostDiskTest, MaxBatchSizeSplitsOneLogicalBatch) {
     auto owned_io = std::make_unique<RecordingBatchDiskBlockIO>();
     auto* io = owned_io.get();

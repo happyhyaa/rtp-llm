@@ -1135,9 +1135,19 @@ TEST(PerRankBlockTransferEngineIntegrationTest, DiskDeviceWaitingForStagingDoesN
     host_to_device->waitDone();
     EXPECT_TRUE(host_to_device->success());
 
+    engine->resetBenchmarkTimingStats();
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    EXPECT_EQ(engine->benchmarkTaskTotalLatencyCount(), 0u);
     held_staging.reset();
     disk_to_device->waitDone();
     EXPECT_TRUE(disk_to_device->success());
+
+    const int64_t total_latency_ns = engine->benchmarkTaskTotalLatencyNs();
+    EXPECT_EQ(engine->benchmarkTaskTotalLatencyCount(), 1u);
+    EXPECT_GE(total_latency_ns, std::chrono::duration_cast<std::chrono::nanoseconds>(
+                              std::chrono::milliseconds(20)).count());
+    EXPECT_EQ(engine->benchmarkTaskTotalLatencyMaxNs(), total_latency_ns);
+    EXPECT_GE(total_latency_ns, engine->benchmarkQueueWaitNs() + engine->benchmarkExecutorNs());
 }
 
 TEST(PerRankBlockTransferEngineIntegrationTest, DiskDeviceFullAndSwaStagingMayOverlapWithSharedWorkers) {

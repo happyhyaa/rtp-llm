@@ -40,6 +40,9 @@ public:
     std::atomic<int64_t> benchmark_queue_wait_ns_{0};
     std::atomic<int64_t> benchmark_executor_ns_{0};
     std::atomic<size_t>  benchmark_executor_count_{0};
+    std::atomic<int64_t> benchmark_task_total_latency_ns_{0};
+    std::atomic<int64_t> benchmark_task_total_latency_max_ns_{0};
+    std::atomic<size_t>  benchmark_task_total_latency_count_{0};
 
 private:
     HostStagingBlockPool* stagingPool(CacheGroupType group_type) const;

@@ -746,6 +746,14 @@ bool TransferBenchmarkRunner::runPurePathTransfer() {
     writer_.addMetric("latency.executor.total_ns", static_cast<double>(executor_ns));
     writer_.addMetric("latency.executor.avg_ns",
                       executor_count == 0 ? 0.0 : static_cast<double>(executor_ns) / executor_count);
+    const size_t  task_total_latency_count  = setup.engine->benchmarkTaskTotalLatencyCount();
+    const int64_t task_total_latency_ns     = setup.engine->benchmarkTaskTotalLatencyNs();
+    const int64_t task_total_latency_max_ns = setup.engine->benchmarkTaskTotalLatencyMaxNs();
+    writer_.addMetric("latency.task_total_latency.count", static_cast<double>(task_total_latency_count));
+    writer_.addMetric("latency.task_total_latency.total_ns", static_cast<double>(task_total_latency_ns));
+    writer_.addMetric("latency.task_total_latency.avg_ns",
+                      task_total_latency_count == 0 ? 0.0 : static_cast<double>(task_total_latency_ns) / task_total_latency_count);
+    writer_.addMetric("latency.task_total_latency.max_ns", static_cast<double>(task_total_latency_max_ns));
     const size_t lowest_api_calls = setup.copy_stats->lowest_api_calls.load(std::memory_order_relaxed);
     const int64_t lowest_api_ns = setup.copy_stats->lowest_api_ns.load(std::memory_order_relaxed);
     writer_.addMetric("latency.lowest_api.count", static_cast<double>(lowest_api_calls));
@@ -753,6 +761,8 @@ bool TransferBenchmarkRunner::runPurePathTransfer() {
                       lowest_api_calls == 0 ? 0.0 : static_cast<double>(lowest_api_ns) / lowest_api_calls);
     writer_.addMetric("latency.lowest_completion.avg_ns",
                       lowest_api_calls == 0 ? 0.0 : static_cast<double>(lowest_api_ns) / lowest_api_calls);
+    writer_.addResolvedConfig(
+        "latency.task_total_latency.boundary", "task_arrival_before_resource_admission_to_transfer_completion");
     writer_.addResolvedConfig("latency.async_completion.boundary", "submit_return_to_observed_wait_return");
     writer_.addResolvedConfig("latency.lowest_completion.boundary", "synchronous_api_return");
 
