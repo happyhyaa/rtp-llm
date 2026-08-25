@@ -424,3 +424,14 @@ py_test(
     ],
     exec_properties = {'gpu':'H20'},
 )
+
+py_test(
+    name = "fused_rope_kvcache_decode_test",
+    srcs = [
+        "fused_rope_kvcache_decode_test.py",
+    ],
+    deps = [
+        "//rtp_llm:testlib",
+    ],
+    exec_properties = {'gpu':'H20'},
+)
