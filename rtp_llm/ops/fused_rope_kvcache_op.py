@@ -214,7 +214,6 @@ class FusedRopeKVCacheDecodeOp:
         return _get_fused_rope_kvcache().decode_fused_rope_kvcache(
             qkv,
             params.position_ids,
-            params.sequence_lengths,
             params.sequence_lengths.size(0),
             self.attn_configs.head_num,
             self.attn_configs.kv_head_num,
