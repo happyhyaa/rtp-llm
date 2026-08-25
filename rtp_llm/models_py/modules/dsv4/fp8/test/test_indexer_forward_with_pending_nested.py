@@ -68,6 +68,7 @@ def _make_indexer_stub(*, bind_pool: bool, device: torch.device) -> IndexerFP8:
     ind.index_topk = 4
     ind.n_heads = 32
     ind.head_dim = INDEXER_HEAD_DIM
+    ind.rope_head_dim = 64
     ind.compress_ratio = 4
     ind.freqs_cis = torch.zeros(1, dtype=torch.float32, device=device)
     ind._cp_ctx = None
@@ -392,8 +393,10 @@ class IndexerFP8OverlapEntryPointsTest(unittest.TestCase):
 
         compute_q_calls = []
 
-        def fake_compute_q(qr_in, freqs):
-            compute_q_calls.append((qr_in, freqs))
+        def fake_compute_q(
+            qr_in, freqs, batched_rope: bool = False, apply_rope: bool = True
+        ):
+            compute_q_calls.append((qr_in, freqs, batched_rope, apply_rope))
             return torch.zeros(
                 2, ind.n_heads, ind.head_dim, dtype=torch.bfloat16, device=self.device
             )
@@ -408,14 +411,24 @@ class IndexerFP8OverlapEntryPointsTest(unittest.TestCase):
         # module-level binding (the production assert path needs DeepGEMM).
         import rtp_llm.models_py.modules.dsv4.fp8.indexer as indexer_mod
 
-        saved_has = indexer_mod.has_fp8_mqa_logits
+        quant_calls = []
+
+        def fake_quant(q, w, freqs, rope_head_dim):
+            quant_calls.append((q, w, freqs, rope_head_dim))
+            return object(), object()
+
         # Also patch _kv_pool_view dim assertion: the 3D pool above (1,1,132)
-        # already satisfies it, but be explicit.
-        try:
-            indexer_mod.has_fp8_mqa_logits = lambda: True  # type: ignore[assignment]
+        # already satisfies it, but be explicit. The quant kernel is tested by
+        # its own GPU UT; this CPU orchestration test verifies its arguments.
+        with (
+            patch.object(indexer_mod, "has_fp8_mqa_logits", return_value=True),
+            patch.object(
+                indexer_mod,
+                "indexer_q_rope_fp8_quant_fold",
+                side_effect=fake_quant,
+            ),
+        ):
             out = ind.forward_with_pending_nested(x, qr, meta, nested_pending=pending)
-        finally:
-            indexer_mod.has_fp8_mqa_logits = saved_has  # type: ignore[assignment]
 
         # T==0 branch returns the empty-topk shape.
         self.assertEqual(tuple(out.shape), (2, 0))
@@ -429,6 +442,11 @@ class IndexerFP8OverlapEntryPointsTest(unittest.TestCase):
         # _compute_indexer_q was invoked (compute_q runs before the
         # nested compressor drain, as in ``forward``).
         self.assertEqual(len(compute_q_calls), 1)
+        self.assertFalse(compute_q_calls[0][2])
+        self.assertFalse(compute_q_calls[0][3])
+        self.assertEqual(len(quant_calls), 1)
+        self.assertIs(quant_calls[0][2], meta.freqs_cis_slice)
+        self.assertEqual(quant_calls[0][3], ind.rope_head_dim)
 
 
 if __name__ == "__main__":

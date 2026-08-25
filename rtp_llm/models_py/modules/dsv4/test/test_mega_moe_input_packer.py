@@ -68,10 +68,15 @@ class TestMegaMoeInputPacker(unittest.TestCase):
     @unittest.skipIf(not torch.cuda.is_available(), "CUDA required")
     def test_fused_matches_torch_buffer_bits(self):
         torch.manual_seed(3)
-        for tokens in (1, 17, 128):
-            with self.subTest(tokens=tokens):
-                dim = 256
-                topk = 8
+        cases = (
+            (1, 256, 8),
+            (17, 256, 8),
+            (128, 256, 8),
+            (257, 4096, 6),
+            (1024, 4096, 6),
+        )
+        for tokens, dim, topk in cases:
+            with self.subTest(tokens=tokens, dim=dim, topk=topk):
                 x = torch.randn(tokens, dim, device="cuda", dtype=torch.bfloat16)
                 weights = torch.randn(tokens, topk, device="cuda", dtype=torch.float32)
                 indices = torch.randint(

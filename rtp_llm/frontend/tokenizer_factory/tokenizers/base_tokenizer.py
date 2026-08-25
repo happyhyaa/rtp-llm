@@ -14,7 +14,7 @@ class BaseTokenizer:
         self.init_tokenizer(tokenizer_path, self.config_json)
 
     def init_tokenizer(self, tokenizer_path: str, config_json: Dict[str, Any]):
-        from transformers import AutoTokenizer
+        from transformers import AutoTokenizer, PreTrainedTokenizerFast
 
         tokenizer_json_path = os.path.join(tokenizer_path, "tokenizer.json")
         tokenizer_obj = None
@@ -26,8 +26,18 @@ class BaseTokenizer:
         tokenizer_config = self._load_tokenizer_config(tokenizer_path)
         extra_kwargs = self._transformers_v5_kwargs(tokenizer_config, tokenizer_obj)
         extra_kwargs.update(self._additional_kwargs(tokenizer_config))
+        tokenizer_loader = AutoTokenizer
+        # Some Qwen3.5 repositories name the generic Rust-tokenizers backend in
+        # tokenizer_config.json. AutoTokenizer treats every non-empty name as a
+        # model-specific Python class, but TokenizersBackend is not one. Load the
+        # generic fast tokenizer directly when tokenizer.json is available.
+        if (
+            tokenizer_config.get("tokenizer_class") == "TokenizersBackend"
+            and tokenizer_obj is not None
+        ):
+            tokenizer_loader = PreTrainedTokenizerFast
         try:
-            self.tokenizer = AutoTokenizer.from_pretrained(
+            self.tokenizer = tokenizer_loader.from_pretrained(
                 tokenizer_path,
                 trust_remote_code=True,
                 verbose=False,

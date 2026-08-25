@@ -17,6 +17,11 @@ import requests
 
 from rtp_llm.config.py_config_modules import MIN_WORKER_INFO_PORT_NUM
 from rtp_llm.test.utils.port_util import PortManager
+from rtp_llm.utils.process_manager import (
+    BACKEND_POST_FRONTEND_DRAIN_SECONDS_ENV,
+    DASH_SC_PRE_STOP_DRAIN_SECONDS_ENV,
+    FRONTEND_PRE_STOP_DRAIN_SECONDS_ENV,
+)
 
 CHECKPOINT_PATH = "CHECKPOINT_PATH"
 MODEL_TYPE = "MODEL_TYPE"
@@ -225,6 +230,29 @@ class MagaServerManager(object):
         logging.info(f"smoke_args_str: {self._smoke_args_str}")
         # Parse smoke_args_str (single string with all arguments) into list
         parsed_args = shlex.split(self._smoke_args_str)
+        drain_overrides = (
+            ("--frontend_pre_stop_drain_seconds", FRONTEND_PRE_STOP_DRAIN_SECONDS_ENV),
+            (
+                "--dash_sc_grpc_pre_stop_drain_seconds",
+                DASH_SC_PRE_STOP_DRAIN_SECONDS_ENV,
+            ),
+            (
+                "--backend_post_frontend_drain_seconds",
+                BACKEND_POST_FRONTEND_DRAIN_SECONDS_ENV,
+            ),
+        )
+        # Production keeps long route/service-discovery convergence windows.
+        # Smoke tests have no external control plane, so default every shutdown
+        # stage to zero while preserving explicit CLI or environment overrides.
+        for flag, env_name in drain_overrides:
+            has_explicit_cli = any(
+                arg == flag or arg.startswith(flag + "=") for arg in parsed_args
+            )
+            has_explicit_env = (
+                self._env_args.get(env_name) is not None or env_name in os.environ
+            )
+            if not has_explicit_cli and not has_explicit_env:
+                parsed_args.extend([flag, "0"])
 
         # Handle --multi_task_prompt argument: convert relative path to absolute path
         for i in range(len(parsed_args)):

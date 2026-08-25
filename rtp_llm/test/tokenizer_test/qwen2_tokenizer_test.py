@@ -7,6 +7,10 @@ from unittest import TestCase, main
 from transformers.models.qwen2.tokenization_qwen2 import Qwen2Tokenizer
 
 from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import TokenizerFactory
+from rtp_llm.frontend.tokenizer_factory.tokenizer_factory_register import (
+    _tokenizer_type_to_module,
+)
+
 
 
 class AllFakeModelTest(TestCase):
@@ -20,6 +24,12 @@ class AllFakeModelTest(TestCase):
         # test special tokens
         res = tokenizer.encode("<|im_start|>hello<|im_end|>")
         self.assertEqual(res, [151644, 14990, 151645])
+
+    def test_qwen35_dense_mtp_is_registered_for_lazy_loading(self):
+        self.assertEqual(
+            _tokenizer_type_to_module["qwen35_dense_mtp"],
+            "rtp_llm.frontend.tokenizer_factory.tokenizers.qwen_tokenizer",
+        )
 
     def test_qwen35_loads_tokenizers_backend_tokenizer_config(self):
         with tempfile.TemporaryDirectory() as temp_dir:

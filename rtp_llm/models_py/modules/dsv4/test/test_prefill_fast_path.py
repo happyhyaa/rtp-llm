@@ -90,6 +90,7 @@ class _FakeV4:
         self._prefill_ws_idx_w = 0
         self._mtp_hidden_buffer = None
         self._mtp_last_hidden_buffer = None
+        self.capture_aux_hidden_layer_ids = ()
         self.norm = lambda h: h + 100
 
     def _propagate_cp_ctx(self, cp_ctx):

@@ -318,7 +318,6 @@ def _wait_for_ranks_startup(
                     raise Exception(f"Rank {i} startup failed: {error_msg}")
             if all(ranks_received):
                 break
-            time.sleep(5)
 
         logging.info(f"All {local_world_size} ranks started successfully")
     finally:

@@ -166,6 +166,14 @@ def test_correctness_fp8_and_scale():
 
 def test_end_to_end_via_einsum():
     """Part B: fused + fp8_einsum ≡ eager + fp8_einsum (bf16 outputs)."""
+    major, minor = torch.cuda.get_device_capability()
+    if major < 9:
+        # DeepGEMM's TMA/GMMA JIT appends the architecture-specific `a`
+        # suffix and only supports Hopper-or-newer devices. Keep the direct
+        # Triton-kernel correctness test above active on Ada (for example L20).
+        print(f"  SKIP fp8_einsum: DeepGEMM unsupported on sm_{major}{minor}")
+        return
+
     torch.manual_seed(7)
     n_heads, head_dim, rope_dim = 64, 512, 64
     nope_dim = head_dim - rope_dim

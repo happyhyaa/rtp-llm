@@ -101,12 +101,12 @@
                             "step_output_len": 10,
                             "iter_count": 10,
                             "cum_log_probs": [
-                                -7.125173568725586
+                                -7.10331916809082
                             ],
                             "beam_responses": [
                                 "\n\nThe error message you're encountering, \"Name",
-                                "\n\nThe error message you're encountering, `Name",
                                 "\n\nThe error you're encountering, `NameError",
+                                "\n\nThe error message you're encountering, `Name",
                                 "\n\nThe error you're encountering, `TypeError:",
                                 "\n\nThe error you're encountering is due to a"
                             ],
@@ -141,7 +141,7 @@
                             "step_output_len": 10,
                             "iter_count": 10,
                             "cum_log_probs": [
-                                -10.710166931152344
+                                -10.698454856872559
                             ],
                             "beam_responses": [
                                 "，并提供答案。\n1. What is your favorite",

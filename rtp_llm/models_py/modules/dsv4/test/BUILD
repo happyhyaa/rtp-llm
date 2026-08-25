@@ -238,8 +238,6 @@ py_test(
         "//rtp_llm/models_py:modules",
         "//rtp_llm:testlib",
     ],
-    tags = ["SM100_ARM"],
-    exec_properties = {"gpu": "SM100_ARM", "gpu_count": "1"},
     target_compatible_with = _DSV4_CUDA13_ONLY,
 )
 
@@ -278,6 +276,8 @@ py_test(
     name = "test_mega_moe_input_packer_perf",
     srcs = ["test_mega_moe_input_packer_perf.py"],
     deps = ["//rtp_llm/models_py:dsv4_fused_kernel_sources"],
+    env = {"RTP_LLM_RUN_PERF_GATE": "1"},
+    tags = ["manual", "H20", "SM100_ARM"],
     target_compatible_with = _DSV4_CUDA13_ONLY,
 )
 

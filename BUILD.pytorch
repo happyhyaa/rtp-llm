@@ -47,6 +47,12 @@ cc_library(
             # "torch/lib/lib*amd*.so*",
         ]),
         "//conditions:default": [],
+    }) + select({
+        # PyTorch 2.11/CUDA13's torch_cuda and torch_python reference symbols
+        # provided by this companion library. Keep it in the central torch target
+        # so every C++ consumer gets a consistent link and runfiles dependency.
+        "@//:using_cuda13_x86": ["torch/lib/libtorch_nvshmem.so"],
+        "//conditions:default": [],
     }),
     hdrs = glob([
         "torch/include/*.h",

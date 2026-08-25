@@ -915,6 +915,9 @@ class BackendTest(JitCacheTestBase):
         configs.jit_config.jit_cache_setup_timeout_s = 5
         configs.jit_config.manage_jit_cache = True
         configs.parallelism_config.world_size = world_size
+        configs.parallelism_config.world_rank = 0
+        configs.parallelism_config.tp_size = world_size
+        configs.parallelism_config.dp_size = 1
         return configs
 
     def patched_backend(self, *, cuda=True, device_count=1, signal_handler=None):
@@ -1032,9 +1035,10 @@ class BackendTest(JitCacheTestBase):
         class FakeBackendManager:
             instance = None
 
-            def __init__(self, _configs):
+            def __init__(self, _configs, shutdown_ready_event=None):
                 self.request_shutdown = mock.Mock()
                 self.serve_forever = mock.Mock()
+                self.shutdown_ready_event = shutdown_ready_event
                 FakeBackendManager.instance = self
 
             def start(self):
@@ -1067,6 +1071,7 @@ class BackendTest(JitCacheTestBase):
             stack.enter_context(mock.patch.object(backend, "_send_pipe_status", status))
             backend.local_rank_start(None, configs, pipe_writer=object())
         self.assertEqual(status.call_args[0][1], "success")
+        self.assertIsNone(FakeBackendManager.instance.shutdown_ready_event)
         handlers[backend.signal.SIGTERM](backend.signal.SIGTERM, None)
         FakeBackendManager.instance.request_shutdown.assert_called_once_with()
         FakeBackendManager.instance.serve_forever.assert_called_once_with()
@@ -1091,9 +1096,10 @@ class BackendTest(JitCacheTestBase):
 
     @staticmethod
     def _fake_create(proc):
-        def fake(_gc, _cfg, _ctx, processes, readers):
+        def fake(_gc, _cfg, _ctx, processes, readers, shutdown_ready_events):
             processes.append(proc)
             readers.append(mock.Mock())
+            shutdown_ready_events.append(None)
 
         return fake
 
@@ -1165,6 +1171,32 @@ class BackendTest(JitCacheTestBase):
             backend._wait_for_ranks_startup(
                 [proc, proc], [pipe("success"), pipe("failed")], 2
             )
+
+    def test_rank_wait_repolls_without_fixed_five_second_delay(self):
+        def pipe(poll_results):
+            reader = mock.Mock()
+            reader.poll.side_effect = poll_results
+            reader.recv.return_value = {
+                "status": "success",
+                "message": "ready",
+            }
+            return reader
+
+        proc = mock.Mock()
+        proc.is_alive.return_value = True
+        proc.exitcode = None
+        first = pipe([True])
+        second = pipe([False, True])
+
+        with mock.patch.object(backend.time, "sleep") as sleep:
+            backend._wait_for_ranks_startup(
+                [proc, proc], [first, second], 2
+            )
+
+        sleep.assert_not_called()
+        self.assertEqual(second.poll.call_count, 2)
+        first.close.assert_called_once_with()
+        second.close.assert_called_once_with()
 
     def test_hard_exit_runs_bounded_cleanup(self):
         configs = self.make_configs(remote="/r")

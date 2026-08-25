@@ -211,9 +211,17 @@ class FusedRopeKVCacheDecodeOp:
         assert params.sequence_lengths.is_cuda or params.sequence_lengths.is_pinned(), (
             "sequence_lengths must be CUDA or pinned host memory"
         )
+        # The current rtp_kernel decode API requires position_ids. Legacy
+        # decode inputs leave combo_position_ids unset; sequence_lengths are
+        # their next-token positions in that path.
+        position_ids = (
+            params.position_ids
+            if params.position_ids is not None
+            else params.sequence_lengths
+        )
         return _get_fused_rope_kvcache().decode_fused_rope_kvcache(
             qkv,
-            params.position_ids,
+            position_ids,
             params.sequence_lengths.size(0),
             self.attn_configs.head_num,
             self.attn_configs.kv_head_num,

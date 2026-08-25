@@ -51,7 +51,9 @@ def _bench(fn, warmup: int = 30, iters: int = 200) -> float:
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
 class MegaMoeInputPackerPerfTest(unittest.TestCase):
-    def _case(self, tokens: int, dim: int = 4096, topk: int = 6):
+    def _case(
+        self, tokens: int, dim: int = 4096, topk: int = 6, measure: bool = False
+    ):
         torch.manual_seed(tokens)
         x = torch.randn(tokens, dim, device="cuda", dtype=torch.bfloat16) * 0.3
         weights = torch.randn(tokens, topk, device="cuda", dtype=torch.float32)
@@ -77,6 +79,9 @@ class MegaMoeInputPackerPerfTest(unittest.TestCase):
         self.assertTrue(torch.equal(ref.topk_idx.cpu(), got.topk_idx.cpu()))
         self.assertTrue(torch.equal(ref.topk_weights.cpu(), got.topk_weights.cpu()))
 
+        if not measure:
+            return None
+
         legacy_ms = _bench(run_legacy)
         optimized_ms = _bench(run_optimized)
         print(
@@ -86,10 +91,21 @@ class MegaMoeInputPackerPerfTest(unittest.TestCase):
         )
         return legacy_ms, optimized_ms
 
+    def test_correctness_token_sweep(self):
+        # Include non-power-of-two sizes to cover masked tail blocks in addition
+        # to the single-token and production-scale paths.
+        for tokens in (1, 17, 257, 1024):
+            with self.subTest(tokens=tokens):
+                self._case(tokens)
+
+    @unittest.skipUnless(
+        os.environ.get("RTP_LLM_RUN_PERF_GATE") == "1",
+        "performance gate runs only on its tagged benchmark target",
+    )
     def test_perf_token_sweep(self):
         gated = {}
         for tokens in (1, 4, 16, 64, 256, 1024, 8192):
-            legacy_ms, optimized_ms = self._case(tokens)
+            legacy_ms, optimized_ms = self._case(tokens, measure=True)
             if tokens in (16, 64, 256, 1024):
                 gated[tokens] = (legacy_ms, optimized_ms)
 

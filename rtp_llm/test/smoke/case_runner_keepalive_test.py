@@ -10,6 +10,11 @@ from unittest.mock import Mock, patch
 from smoke.case_runner import CaseRunner
 from smoke.task_info import TaskStates
 from rtp_llm.test.utils.maga_server_manager import MagaServerManager
+from rtp_llm.utils.process_manager import (
+    BACKEND_POST_FRONTEND_DRAIN_SECONDS_ENV,
+    DASH_SC_PRE_STOP_DRAIN_SECONDS_ENV,
+    FRONTEND_PRE_STOP_DRAIN_SECONDS_ENV,
+)
 
 
 class FakeServerManager:
@@ -220,6 +225,81 @@ class KeepaliveTest(unittest.TestCase):
 
 
 class MagaServerManagerShutdownTest(unittest.TestCase):
+    def test_smoke_server_disables_production_route_drain_by_default(self):
+        process = Mock(pid=123)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            flags = {
+                "frontend": "--frontend_pre_stop_drain_seconds",
+                "dash_sc": "--dash_sc_grpc_pre_stop_drain_seconds",
+                "backend": "--backend_post_frontend_drain_seconds",
+            }
+            cases = (
+                ({}, "", {name: "0" for name in flags}, {}),
+                (
+                    {BACKEND_POST_FRONTEND_DRAIN_SECONDS_ENV: "7"},
+                    "",
+                    {"frontend": "0", "dash_sc": "0", "backend": None},
+                    {BACKEND_POST_FRONTEND_DRAIN_SECONDS_ENV: "7"},
+                ),
+                (
+                    {FRONTEND_PRE_STOP_DRAIN_SECONDS_ENV: "7"},
+                    "--dash_sc_grpc_pre_stop_drain_seconds=9",
+                    {"frontend": None, "dash_sc": "9", "backend": "0"},
+                    {FRONTEND_PRE_STOP_DRAIN_SECONDS_ENV: "7"},
+                ),
+            )
+            for env_args, smoke_args, expected_cli, expected_envs in cases:
+                with self.subTest(
+                    env_args=env_args, smoke_args=smoke_args
+                ), patch.dict(
+                    os.environ,
+                    {
+                        "TEST_UNDECLARED_OUTPUTS_DIR": temp_dir,
+                        "MAGA_SERVER_WORK_DIR": temp_dir,
+                    },
+                    clear=True,
+                ), patch(
+                    "rtp_llm.test.utils.maga_server_manager.subprocess.Popen",
+                    return_value=process,
+                ) as popen, patch.object(
+                    MagaServerManager,
+                    "wait_sever_done",
+                    return_value=True,
+                ):
+                    manager = MagaServerManager(
+                        env_args=env_args,
+                        port="12345",
+                        smoke_args_str=smoke_args,
+                    )
+                    self.assertTrue(manager.start_server(log_to_file=False))
+
+                command = popen.call_args.args[0]
+                child_env = popen.call_args.kwargs["env"]
+                for name, flag in flags.items():
+                    split_value = None
+                    if flag in command:
+                        self.assertEqual(command.count(flag), 1)
+                        split_value = command[command.index(flag) + 1]
+                    equals_values = [
+                        arg.split("=", 1)[1]
+                        for arg in command
+                        if arg.startswith(flag + "=")
+                    ]
+                    self.assertLessEqual(len(equals_values), 1)
+                    actual_cli = equals_values[0] if equals_values else split_value
+                    self.assertEqual(actual_cli, expected_cli[name])
+
+                for env_name in (
+                    FRONTEND_PRE_STOP_DRAIN_SECONDS_ENV,
+                    DASH_SC_PRE_STOP_DRAIN_SECONDS_ENV,
+                    BACKEND_POST_FRONTEND_DRAIN_SECONDS_ENV,
+                ):
+                    self.assertEqual(
+                        child_env.get(env_name), expected_envs.get(env_name)
+                    )
+                manager._server_process = None
+
     @staticmethod
     def make_manager(log_file: str):
         manager = MagaServerManager(port="12345")
