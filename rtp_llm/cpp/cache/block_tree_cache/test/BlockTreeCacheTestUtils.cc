@@ -621,6 +621,8 @@ int BlockTreeCacheTestPeer::pendingTasksForTest(const BlockTreeCache& cache) {
 
 void BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(const BlockTreeCache& cache) {
     cache.task_pool_->waitForIdle();
+    cache.transfer_dispatcher_->per_rank_engine_->transfer_task_pool_->waitForIdle();
+    cache.task_pool_->waitForIdle();
 }
 
 bool BlockTreeCacheTestPeer::armQueueRejectionForTest(BlockTreeCache& cache) {
