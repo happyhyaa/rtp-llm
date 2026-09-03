@@ -53,10 +53,12 @@ DeviceDiskTransferExecutor::DeviceDiskTransferExecutor(DeviceHostTransferExecuto
                                                        HostDiskTransferExecutor&       host_disk_executor,
                                                        const std::vector<GroupSetPtr>& group_sets,
                                                        size_t                          staging_block_count,
-                                                       BlockTreeTaskPool&              transfer_task_pool):
+                                                       BlockTreeTaskPool&              transfer_task_pool,
+                                                       std::chrono::milliseconds       queue_wait_timeout):
     device_host_executor_(device_host_executor),
     host_disk_executor_(host_disk_executor),
-    transfer_task_pool_(transfer_task_pool) {
+    transfer_task_pool_(transfer_task_pool),
+    queue_wait_timeout_(queue_wait_timeout) {
     RTP_LLM_CHECK(staging_block_count >= 2 && staging_block_count % 2 == 0);
 
     size_t max_stride  = 0;
@@ -181,7 +183,7 @@ DeviceDiskTransferExecutor::execute(const std::vector<TransferDescriptor>& descr
                     stage_state->completeBatch(
                         ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "unknown disk-to-device exception"));
                 }
-                }, BlockTreeTaskPool::kDefaultQueueWaitTimeout, std::move(on_timeout));
+                }, queue_wait_timeout_, std::move(on_timeout));
             if (!accepted) {
                 stage_state->completeBatch(ErrorInfo(
                     ErrorCode::EXECUTION_EXCEPTION,
@@ -237,7 +239,7 @@ DeviceDiskTransferExecutor::executeDeviceToDisk(const TransferDescriptor& descri
             } catch (...) {
                 context->complete(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "unknown device-to-disk exception"));
             }
-        }, BlockTreeTaskPool::kDefaultQueueWaitTimeout, std::move(on_timeout));
+        }, queue_wait_timeout_, std::move(on_timeout));
         if (!accepted) {
             context->complete(ErrorInfo(
                 ErrorCode::EXECUTION_EXCEPTION, "RESOURCE_EXHAUSTED: device-to-disk queue is full or stopped"));

@@ -106,7 +106,7 @@ void BlockTreeStorer::submitLowerTierLocked(const CacheKeysType&                
         scheduleStoreSettlement(task, ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "store business queue timeout"));
     };
     if (!task_pool_->submit([this, task]() { runStoreTask(task); },
-                            BlockTreeTaskPool::kDefaultQueueWaitTimeout,
+                            std::chrono::milliseconds(target_tier == Tier::DISK ? disk_timeout_ms_ : host_timeout_ms_),
                             std::move(on_timeout))) {
         RTP_LLM_LOG_WARNING("store aborted: business task submission rejected, target=%s blocks=%zu",
                             tierName(target_tier),

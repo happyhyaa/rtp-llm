@@ -40,6 +40,7 @@ BlockTreeEvictor::BlockTreeEvictor(BlockTree*                     tree,
     settled_(std::move(settled)),
     task_runner_(std::make_unique<EvictionTaskRunner>(
         tree->groupSets(), transfer_dispatcher, memory_timeout_ms, disk_timeout_ms)),
+    memory_timeout_ms_(memory_timeout_ms),
     disk_timeout_ms_(disk_timeout_ms),
     max_device_host_batch_(max_device_host_batch),
     max_non_device_host_batch_(max_non_device_host_batch) {
@@ -276,8 +277,12 @@ bool BlockTreeEvictor::submitEvictionTask(EvictionTransferTask task) {
                             task_ptr->descs.size());
         scheduleEvictionSettlement(task_ptr, false);
     };
+    const auto& first_desc = task_ptr->descs.front();
+    const auto  queue_wait_timeout = std::chrono::milliseconds(
+        first_desc.source_tier == Tier::DISK || first_desc.target_tier == Tier::DISK ? disk_timeout_ms_ :
+                                                                                       memory_timeout_ms_);
     const bool submitted = task_pool_->submit([this, task_ptr]() { runEvictionTask(task_ptr); },
-                                              BlockTreeTaskPool::kDefaultQueueWaitTimeout,
+                                              queue_wait_timeout,
                                               std::move(on_timeout));
     if (!submitted) {
         updatePendingRelease(task_ptr->descs, false);
