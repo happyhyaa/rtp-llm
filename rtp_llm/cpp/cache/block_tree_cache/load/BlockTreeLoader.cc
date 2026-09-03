@@ -311,7 +311,10 @@ bool BlockTreeLoader::commitLoad(const std::shared_ptr<LoadAsyncContext>& contex
         scheduleContextSettlement(task, ready_context);
     });
     if (task) {
-        auto on_timeout = [task]() {
+        const int64_t queue_begin =
+            metrics_reporter_.reportBusinessQueueWaitStarted(CacheTransferOperation::LOAD, false);
+        auto on_timeout = [this, task, queue_begin]() {
+            metrics_reporter_.reportBusinessQueueWaitFinished(CacheTransferOperation::LOAD, false, queue_begin);
             RTP_LLM_LOG_WARNING("load expired in business queue, descriptor_count=%zu", task->load_descs.size());
             if (!task->context->completeTransfers(task->load_descs.size(), false)) {
                 RTP_LLM_LOG_WARNING("failed to record expired load, descriptor_count=%zu", task->load_descs.size());
@@ -320,9 +323,15 @@ bool BlockTreeLoader::commitLoad(const std::shared_ptr<LoadAsyncContext>& contex
         const bool uses_disk = std::any_of(task->load_descs.begin(), task->load_descs.end(), [](const auto& desc) {
             return desc.source_tier == Tier::DISK || desc.target_tier == Tier::DISK;
         });
-        if (!task_pool_->submit([this, task]() { runLoadTask(task); },
+        if (!task_pool_->submit([this, task, queue_begin]() {
+                                    metrics_reporter_.reportBusinessQueueWaitFinished(
+                                        CacheTransferOperation::LOAD, false, queue_begin);
+                                    runLoadTask(task);
+                                },
                                 std::chrono::milliseconds(uses_disk ? disk_timeout_ms_ : host_timeout_ms_),
                                 std::move(on_timeout))) {
+            metrics_reporter_.reportBusinessQueueWaitFinished(
+                CacheTransferOperation::LOAD, false, queue_begin, false);
             return false;
         }
     }
@@ -432,7 +441,13 @@ void BlockTreeLoader::scheduleContextSettlement(const LoadTaskRunner::TaskPtr&  
             RTP_LLM_LOG_WARNING("failed to publish load context settlement, context_id=%lu", context->contextId());
         }
     };
-    if (!task_pool_->submitCompletion(settle)) {
+    const int64_t queue_begin =
+        metrics_reporter_.reportBusinessQueueWaitStarted(CacheTransferOperation::LOAD, true);
+    if (!task_pool_->submitCompletion([this, settle = std::move(settle), queue_begin]() mutable {
+            metrics_reporter_.reportBusinessQueueWaitFinished(CacheTransferOperation::LOAD, true, queue_begin);
+            settle();
+        })) {
+        metrics_reporter_.reportBusinessQueueWaitFinished(CacheTransferOperation::LOAD, true, queue_begin, false);
         RTP_LLM_LOG_WARNING("load completion queue is closed; dropping settlement during shutdown");
     }
 }

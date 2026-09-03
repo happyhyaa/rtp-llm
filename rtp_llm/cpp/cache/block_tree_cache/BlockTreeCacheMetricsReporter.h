@@ -110,11 +110,21 @@ public:
                                    bool                                   success,
                                    const std::vector<TransferDescriptor>& successful_descriptors,
                                    const std::vector<GroupSetPtr>&        group_sets);
+    int64_t reportBusinessQueueWaitStarted(CacheTransferOperation operation, bool callback) noexcept;
+    void    reportBusinessQueueWaitFinished(CacheTransferOperation operation,
+                                            bool                   callback,
+                                            int64_t                begin_time_us,
+                                            bool                   report_latency = true) noexcept;
+    int64_t reportTransferQueueWaitStarted(Tier source_tier, Tier target_tier) noexcept;
+    void    reportTransferQueueWaitFinished(Tier    source_tier,
+                                            Tier    target_tier,
+                                            int64_t begin_time_us,
+                                            bool    report_latency = true) noexcept;
     void    reportStorePublish(Tier target_tier, size_t accepted_blocks, size_t duplicate_blocks) const;
 
 private:
     static constexpr size_t kOperationCount = 3;
-    static constexpr size_t kDirectionCount = 5;
+    static constexpr size_t kDirectionCount = 6;
 
     static int transferDirectionIndex(Tier source_tier, Tier target_tier);
     void       reportEvictedDescriptor(const TransferDescriptor&       desc,
@@ -131,9 +141,19 @@ private:
     void accumulateTransferBytes(const std::vector<TransferDescriptor>& descs,
                                  const std::vector<GroupSetPtr>&        group_sets,
                                  BlockTreeTransferBytes&                transfer_bytes) const;
+    void reportQueueWaitMetric(bool        callback,
+                               const char* pool_type,
+                               const char* operation,
+                               Tier        source_tier,
+                               Tier        target_tier,
+                               int64_t     waiting_tasks,
+                               int64_t     latency_us) const noexcept;
 
     std::shared_ptr<kmonitor::MetricsReporter>                                     metrics_reporter_;
     std::array<std::array<std::atomic<int64_t>, kDirectionCount>, kOperationCount> transfer_in_flight_{};
+    std::array<std::atomic<int64_t>, kOperationCount>                              business_task_waiting_{};
+    std::array<std::atomic<int64_t>, kOperationCount>                              business_callback_waiting_{};
+    std::array<std::atomic<int64_t>, kDirectionCount>                              transfer_task_waiting_{};
 };
 
 }  // namespace rtp_llm

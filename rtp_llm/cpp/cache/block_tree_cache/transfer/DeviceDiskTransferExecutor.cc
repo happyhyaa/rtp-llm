@@ -6,6 +6,7 @@
 #include <utility>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheMetricsReporter.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/DeviceHostTransferExecutor.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/HostDiskTransferExecutor.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferBatchAsyncContext.h"
@@ -143,7 +144,13 @@ DeviceDiskTransferExecutor::execute(const std::vector<TransferDescriptor>& descr
             }
 
             auto batch_leases = std::make_shared<HostStagingBlockPool::HostStagingBlockBatch>(std::move(*leases));
-            auto on_timeout = [stage_state, begin, end]() {
+            const int64_t queue_begin = metrics_reporter_ == nullptr ?
+                                            0 :
+                                            metrics_reporter_->reportTransferQueueWaitStarted(Tier::DISK, Tier::DEVICE);
+            auto on_timeout = [this, stage_state, begin, end, queue_begin]() {
+                if (metrics_reporter_ != nullptr) {
+                    metrics_reporter_->reportTransferQueueWaitFinished(Tier::DISK, Tier::DEVICE, queue_begin);
+                }
                 stage_state->completeBatch(ErrorInfo(
                     ErrorCode::DEADLINE_EXCEEDED,
                     "disk-to-device expired in TE worker queue, descriptor_range=[" + std::to_string(begin) + ","
@@ -156,7 +163,11 @@ DeviceDiskTransferExecutor::execute(const std::vector<TransferDescriptor>& descr
                  sub_group_sets = std::move(sub_group_sets),
                  batch_leases = std::move(batch_leases),
                  begin,
-                 end] {
+                 end,
+                 queue_begin] {
+                if (metrics_reporter_ != nullptr) {
+                    metrics_reporter_->reportTransferQueueWaitFinished(Tier::DISK, Tier::DEVICE, queue_begin);
+                }
                 try {
                     std::vector<HostBufferView> hosts;
                     hosts.reserve(batch_leases->size());
@@ -185,6 +196,10 @@ DeviceDiskTransferExecutor::execute(const std::vector<TransferDescriptor>& descr
                 }
                 }, queue_wait_timeout_, std::move(on_timeout));
             if (!accepted) {
+                if (metrics_reporter_ != nullptr) {
+                    metrics_reporter_->reportTransferQueueWaitFinished(
+                        Tier::DISK, Tier::DEVICE, queue_begin, false);
+                }
                 stage_state->completeBatch(ErrorInfo(
                     ErrorCode::EXECUTION_EXCEPTION,
                     "RESOURCE_EXHAUSTED: disk-to-device queue is full or stopped, descriptor_range=["
@@ -214,10 +229,24 @@ DeviceDiskTransferExecutor::executeDeviceToDisk(const TransferDescriptor& descri
         }
 
         auto batch_leases = std::make_shared<HostStagingBlockPool::HostStagingBlockBatch>(std::move(*leases));
-        auto on_timeout = [context]() {
+        const int64_t queue_begin = metrics_reporter_ == nullptr ?
+                                        0 :
+                                        metrics_reporter_->reportTransferQueueWaitStarted(Tier::DEVICE, Tier::DISK);
+        auto on_timeout = [this, context, queue_begin]() {
+            if (metrics_reporter_ != nullptr) {
+                metrics_reporter_->reportTransferQueueWaitFinished(Tier::DEVICE, Tier::DISK, queue_begin);
+            }
             context->complete(ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "device-to-disk expired in TE worker queue"));
         };
-        const bool accepted = transfer_task_pool_.submit([this, context, descriptor, group_set_ptr, batch_leases] {
+        const bool accepted = transfer_task_pool_.submit([this,
+                                                          context,
+                                                          descriptor,
+                                                          group_set_ptr,
+                                                          batch_leases,
+                                                          queue_begin] {
+            if (metrics_reporter_ != nullptr) {
+                metrics_reporter_->reportTransferQueueWaitFinished(Tier::DEVICE, Tier::DISK, queue_begin);
+            }
             try {
                 const std::vector<HostBufferView> hosts{
                     batch_leases->front().blockBuffer(group_set_ptr->payloadBytes())};
@@ -241,6 +270,9 @@ DeviceDiskTransferExecutor::executeDeviceToDisk(const TransferDescriptor& descri
             }
         }, queue_wait_timeout_, std::move(on_timeout));
         if (!accepted) {
+            if (metrics_reporter_ != nullptr) {
+                metrics_reporter_->reportTransferQueueWaitFinished(Tier::DEVICE, Tier::DISK, queue_begin, false);
+            }
             context->complete(ErrorInfo(
                 ErrorCode::EXECUTION_EXCEPTION, "RESOURCE_EXHAUSTED: device-to-disk queue is full or stopped"));
         }

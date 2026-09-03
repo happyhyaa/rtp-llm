@@ -349,7 +349,103 @@ int BlockTreeCacheMetricsReporter::transferDirectionIndex(Tier source_tier, Tier
     if (source_tier == Tier::DEVICE && target_tier == Tier::DISK) {
         return 4;
     }
+    if (source_tier == Tier::DISK && target_tier == Tier::HOST) {
+        return 5;
+    }
     return -1;
+}
+
+int64_t BlockTreeCacheMetricsReporter::reportBusinessQueueWaitStarted(CacheTransferOperation operation,
+                                                                      bool callback) noexcept {
+    if (!enabled()) {
+        return 0;
+    }
+    const int64_t begin_time_us = currentTimeUs();
+    const size_t index = transferOperationIndex(operation);
+    auto& counter = callback ? business_callback_waiting_[index] : business_task_waiting_[index];
+    const int64_t waiting = counter.fetch_add(1) + 1;
+    reportQueueWaitMetric(callback, "business", cacheTransferOperationName(operation), Tier::NONE, Tier::NONE, waiting, -1);
+    return begin_time_us;
+}
+
+void BlockTreeCacheMetricsReporter::reportBusinessQueueWaitFinished(CacheTransferOperation operation,
+                                                                    bool                   callback,
+                                                                    int64_t                begin_time_us,
+                                                                    bool report_latency) noexcept {
+    if (begin_time_us == 0) {
+        return;
+    }
+    const size_t index = transferOperationIndex(operation);
+    auto& counter = callback ? business_callback_waiting_[index] : business_task_waiting_[index];
+    reportQueueWaitMetric(callback,
+                          "business",
+                          cacheTransferOperationName(operation),
+                          Tier::NONE,
+                          Tier::NONE,
+                          counter.fetch_sub(1) - 1,
+                          report_latency ? currentTimeUs() - begin_time_us : -1);
+}
+
+int64_t BlockTreeCacheMetricsReporter::reportTransferQueueWaitStarted(Tier source_tier, Tier target_tier) noexcept {
+    if (!enabled()) {
+        return 0;
+    }
+    const int index = transferDirectionIndex(source_tier, target_tier);
+    if (index < 0) {
+        return 0;
+    }
+    const int64_t begin_time_us = currentTimeUs();
+    const int64_t waiting = transfer_task_waiting_[static_cast<size_t>(index)].fetch_add(1) + 1;
+    reportQueueWaitMetric(false, "transfer", nullptr, source_tier, target_tier, waiting, -1);
+    return begin_time_us;
+}
+
+void BlockTreeCacheMetricsReporter::reportTransferQueueWaitFinished(Tier    source_tier,
+                                                                    Tier    target_tier,
+                                                                    int64_t begin_time_us,
+                                                                    bool report_latency) noexcept {
+    if (begin_time_us == 0) {
+        return;
+    }
+    const int index = transferDirectionIndex(source_tier, target_tier);
+    if (index < 0) {
+        return;
+    }
+    reportQueueWaitMetric(false,
+                          "transfer",
+                          nullptr,
+                          source_tier,
+                          target_tier,
+                          transfer_task_waiting_[static_cast<size_t>(index)].fetch_sub(1) - 1,
+                          report_latency ? currentTimeUs() - begin_time_us : -1);
+}
+
+void BlockTreeCacheMetricsReporter::reportQueueWaitMetric(bool        callback,
+                                                          const char* pool_type,
+                                                          const char* operation,
+                                                          Tier        source_tier,
+                                                          Tier        target_tier,
+                                                          int64_t     waiting_tasks,
+                                                          int64_t     latency_us) const noexcept {
+    if (!enabled()) {
+        return;
+    }
+    try {
+        RtpLLMCacheTransferMetricsCollector collector;
+        collector.pool_type                 = pool_type;
+        collector.operation                 = operation == nullptr ? "" : operation;
+        collector.source_tier               = source_tier == Tier::NONE ? "" : tierName(source_tier);
+        collector.target_tier               = target_tier == Tier::NONE ? "" : tierName(target_tier);
+        collector.queue_waiting_tasks       = waiting_tasks;
+        collector.queue_wait_latency_us     = latency_us;
+        collector.report_transfer           = false;
+        collector.report_task_queue         = !callback;
+        collector.report_callback_queue     = callback;
+        collector.report_queue_wait_latency = latency_us >= 0;
+        metrics_reporter_->report<RtpLLMCacheTransferMetrics, RtpLLMCacheTransferMetricsCollector>(nullptr,
+                                                                                                   &collector);
+    } catch (...) {
+    }
 }
 
 int64_t BlockTreeCacheMetricsReporter::reportTransferStarted(CacheTransferOperation operation,

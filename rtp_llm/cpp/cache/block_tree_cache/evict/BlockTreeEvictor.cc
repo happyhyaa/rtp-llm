@@ -270,7 +270,10 @@ bool BlockTreeEvictor::batchDropLocked(size_t group_set_id, Tier source_tier, si
 bool BlockTreeEvictor::submitEvictionTask(EvictionTransferTask task) {
     auto task_ptr = std::make_shared<EvictionTransferTask>(std::move(task));
     updatePendingRelease(task_ptr->descs, true);
-    auto on_timeout = [this, task_ptr]() {
+    const int64_t queue_begin =
+        metrics_reporter_->reportBusinessQueueWaitStarted(CacheTransferOperation::EVICT, false);
+    auto on_timeout = [this, task_ptr, queue_begin]() {
+        metrics_reporter_->reportBusinessQueueWaitFinished(CacheTransferOperation::EVICT, false, queue_begin);
         RTP_LLM_LOG_WARNING("eviction expired in business queue, source=%s target=%s descriptors=%zu",
                             tierName(task_ptr->descs.front().source_tier),
                             tierName(task_ptr->descs.front().target_tier),
@@ -281,10 +284,16 @@ bool BlockTreeEvictor::submitEvictionTask(EvictionTransferTask task) {
     const auto  queue_wait_timeout = std::chrono::milliseconds(
         first_desc.source_tier == Tier::DISK || first_desc.target_tier == Tier::DISK ? disk_timeout_ms_ :
                                                                                        memory_timeout_ms_);
-    const bool submitted = task_pool_->submit([this, task_ptr]() { runEvictionTask(task_ptr); },
+    const bool submitted = task_pool_->submit([this, task_ptr, queue_begin]() {
+                                                  metrics_reporter_->reportBusinessQueueWaitFinished(
+                                                      CacheTransferOperation::EVICT, false, queue_begin);
+                                                  runEvictionTask(task_ptr);
+                                              },
                                               queue_wait_timeout,
                                               std::move(on_timeout));
     if (!submitted) {
+        metrics_reporter_->reportBusinessQueueWaitFinished(
+            CacheTransferOperation::EVICT, false, queue_begin, false);
         updatePendingRelease(task_ptr->descs, false);
         rollbackTransferLocked(task_ptr->descs);
         return false;
@@ -384,15 +393,22 @@ void BlockTreeEvictor::scheduleEvictionSettlement(std::shared_ptr<const Eviction
         }
     };
 
+    const int64_t queue_begin =
+        metrics_reporter_->reportBusinessQueueWaitStarted(CacheTransferOperation::EVICT, true);
     bool submitted = false;
     try {
-        submitted = task_pool_->submitCompletion(settle);
+        submitted = task_pool_->submitCompletion([this, settle = std::move(settle), queue_begin]() mutable {
+            metrics_reporter_->reportBusinessQueueWaitFinished(CacheTransferOperation::EVICT, true, queue_begin);
+            settle();
+        });
     } catch (const std::exception& error) {
         RTP_LLM_LOG_ERROR("failed to enqueue eviction settlement: %s", error.what());
     } catch (...) {
         RTP_LLM_LOG_ERROR("failed to enqueue eviction settlement with unknown exception");
     }
     if (!submitted) {
+        metrics_reporter_->reportBusinessQueueWaitFinished(
+            CacheTransferOperation::EVICT, true, queue_begin, false);
         RTP_LLM_LOG_WARNING("eviction completion queue is closed; dropping settlement during shutdown");
     }
 }
