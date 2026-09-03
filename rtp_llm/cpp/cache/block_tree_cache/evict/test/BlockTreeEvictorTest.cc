@@ -270,8 +270,8 @@ public:
                                                   task_pool,
                                                   metrics_reporter_,
                                                   mutex_,
-                                                  0,
-                                                  0,
+                                                  BlockTreeTaskPool::kDefaultQueueWaitTimeout.count(),
+                                                  BlockTreeTaskPool::kDefaultQueueWaitTimeout.count(),
                                                   max_device_host_batch,
                                                   max_non_device_host_batch,
                                                   std::move(is_tier_enabled),
@@ -734,7 +734,6 @@ TEST(BlockTreeEvictorAsyncTest, ForceDropDetachesTwoGroupSetsBeforeLateCompletio
     EXPECT_EQ(environment.pendingReleaseCount(), 0u);
     EXPECT_EQ(environment.settledEvents(),
               (std::vector<std::pair<bool, bool>>{{true, false}, {true, false}, {true, false}}));
-
 }
 
 void verifyMixedDetachedBatchSettlement(bool transfer_success) {
