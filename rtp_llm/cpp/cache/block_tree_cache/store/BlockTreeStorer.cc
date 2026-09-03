@@ -93,9 +93,7 @@ void BlockTreeStorer::submitLowerTierLocked(const CacheKeysType&                
     task->target_tier = target_tier;
     task->cache_keys  = cache_keys;
 
-    block_tree_cache_detail::ScopeRollback prepare_guard([this, &task]() {
-        settleLocked(*task, /*publish=*/false);
-    });
+    block_tree_cache_detail::ScopeRollback prepare_guard([this, &task]() { settleLocked(*task, /*publish=*/false); });
 
     if (!store_task_runner_.prepareTask(*task, resources)) {
         return;
@@ -110,7 +108,7 @@ void BlockTreeStorer::submitLowerTierLocked(const CacheKeysType&                
     };
     task->enqueue_time_us = currentTimeUs();
     if (!task_pool_->submit([this, task]() { runStoreTask(task); },
-                            BlockTreeTaskPool::kDefaultQueueWaitTimeout,
+                            std::chrono::milliseconds(target_tier == Tier::DISK ? disk_timeout_ms_ : host_timeout_ms_),
                             std::move(on_timeout))) {
         RTP_LLM_LOG_WARNING("store aborted: business task submission rejected, target=%s blocks=%zu",
                             tierName(target_tier),
@@ -122,24 +120,22 @@ void BlockTreeStorer::submitLowerTierLocked(const CacheKeysType&                
 
 void BlockTreeStorer::runStoreTask(const StoreTaskPtr& task) {
     if (stopping_.load()) {
-        scheduleStoreSettlement(
-            task, ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "store stopped before transfer"));
+        scheduleStoreSettlement(task, ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "store stopped before transfer"));
         metrics_reporter_.reportTransferTaskQueueWait(CacheTransferOperation::STORE,
                                                       currentTimeUs() - task->enqueue_time_us);
         return;
     }
 
     try {
-        metrics_reporter_.reportTransferTaskQueueWait(
-            CacheTransferOperation::STORE, currentTimeUs() - task->enqueue_time_us);
-        store_task_runner_.runTransfer(task,
-                                       *transfer_dispatcher_,
-                                       metrics_reporter_,
-                                       host_timeout_ms_,
-                                       disk_timeout_ms_,
-                                       [this, task](ErrorInfo error) {
-                                           scheduleStoreSettlement(task, std::move(error));
-                                       });
+        metrics_reporter_.reportTransferTaskQueueWait(CacheTransferOperation::STORE,
+                                                      currentTimeUs() - task->enqueue_time_us);
+        store_task_runner_.runTransfer(
+            task,
+            *transfer_dispatcher_,
+            metrics_reporter_,
+            host_timeout_ms_,
+            disk_timeout_ms_,
+            [this, task](ErrorInfo error) { scheduleStoreSettlement(task, std::move(error)); });
     } catch (const std::exception& error) {
         RTP_LLM_LOG_ERROR("store copy threw: %s", error.what());
         scheduleStoreSettlement(task, ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, error.what()));
