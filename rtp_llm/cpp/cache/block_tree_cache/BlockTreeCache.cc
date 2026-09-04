@@ -7,7 +7,6 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/diagnostic/FullPrefixInvariantScanner.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/evict/BlockTreeEvictor.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/transfer/PerRankBlockTransferEngine.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DiskBlockPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/HostBlockPool.h"
 #include "rtp_llm/cpp/cache/AsyncContext.h"
@@ -236,8 +235,8 @@ void BlockTreeCache::reportMetrics() const {
         snapshots = metrics_reporter_.collectEvictableMetricsSnapshots(tree_->groupSets(), evictor_);
     }
     metrics_reporter_.reportEvictableCandidateCount(snapshots);
-    metrics_reporter_.reportQueueBacklog(*task_pool_, "business");
-    metrics_reporter_.reportQueueBacklog(*transfer_dispatcher_->per_rank_engine_->transfer_task_pool_, "transfer");
+    metrics_reporter_.reportQueueBacklog(task_pool_->queueSizes(), "business");
+    metrics_reporter_.reportQueueBacklog(transfer_dispatcher_->queueSizes(), "transfer");
 }
 
 BlockTreeKeySnapshot BlockTreeCache::getKeySnapshot(size_t limit) const {

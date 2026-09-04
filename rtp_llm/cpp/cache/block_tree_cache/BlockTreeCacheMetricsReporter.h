@@ -19,8 +19,7 @@ class MetricsReporter;
 
 namespace rtp_llm {
 
-class BlockTreeCache;
-class BlockTreeTaskPool;
+struct BlockTreeQueueSizes;
 
 struct BlockTreePoolMetricsSnapshot {
     Tier        tier{Tier::DEVICE};
@@ -131,10 +130,9 @@ public:
                                             int64_t begin_time_us,
                                             bool    report_latency = true) noexcept;
     void    reportStorePublish(Tier target_tier, size_t accepted_blocks, size_t duplicate_blocks) const;
+    void    reportQueueBacklog(const BlockTreeQueueSizes& queue_sizes, const char* pool_type) const;
 
 private:
-    friend class BlockTreeCache;
-
     static constexpr size_t kOperationCount = 3;
     static constexpr size_t kDirectionCount = 5;
 
@@ -159,8 +157,6 @@ private:
                                Tier        source_tier,
                                Tier        target_tier,
                                int64_t     latency_us) const noexcept;
-    void reportQueueBacklog(BlockTreeTaskPool& task_pool, const char* pool_type) const;
-
     std::shared_ptr<kmonitor::MetricsReporter>                                     metrics_reporter_;
     std::array<std::array<std::atomic<int64_t>, kDirectionCount>, kOperationCount> transfer_in_flight_{};
 };

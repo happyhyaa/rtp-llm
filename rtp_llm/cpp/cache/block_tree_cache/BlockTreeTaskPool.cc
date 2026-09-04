@@ -112,6 +112,11 @@ void BlockTreeTaskPool::stopAdmission() {
     admission_stopped_ = true;
 }
 
+BlockTreeQueueSizes BlockTreeTaskPool::queueSizes() const {
+    std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+    return {load_queue_.size(), background_queue_.size(), completion_queue_.size()};
+}
+
 size_t BlockTreeTaskPool::normalQueueSizeLocked() const {
     return load_queue_.size() + background_queue_.size();
 }

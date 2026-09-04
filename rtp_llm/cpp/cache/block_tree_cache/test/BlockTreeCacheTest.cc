@@ -359,7 +359,7 @@ TEST(BlockTreeCacheMetricsTest, QueueBacklogReportsLoadBackgroundCompletionAndNo
     for (size_t i = 0; i < 4; ++i) {
         ASSERT_TRUE(pool.submitCompletion([] {}));
     }
-    reporter.reportQueueBacklog(pool, "business");
+    reporter.reportQueueBacklog(pool.queueSizes(), "business");
 
     RtpLLMCacheTransferMetrics* transfer_metrics = metrics_reporter->getMetricsGroup<RtpLLMCacheTransferMetrics>();
     ASSERT_NE(transfer_metrics, nullptr);

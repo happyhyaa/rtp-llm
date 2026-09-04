@@ -125,4 +125,8 @@ void BlockTransferDispatcher::setMetricsReporter(BlockTreeCacheMetricsReporter* 
     per_rank_engine_->setMetricsReporter(metrics_reporter);
 }
 
+BlockTreeQueueSizes BlockTransferDispatcher::queueSizes() const {
+    return per_rank_engine_->queueSizes();
+}
+
 }  // namespace rtp_llm

@@ -104,6 +104,10 @@ void PerRankBlockTransferEngine::setMetricsReporter(BlockTreeCacheMetricsReporte
     }
 }
 
+BlockTreeQueueSizes PerRankBlockTransferEngine::queueSizes() const {
+    return transfer_task_pool_->queueSizes();
+}
+
 std::shared_ptr<AsyncContext> PerRankBlockTransferEngine::submit(const std::vector<TransferDescriptor>& descriptors) {
     if (descriptors.empty()) {
         return std::make_shared<CompletedAsyncContext>(transferStatusToErrorInfo(TransferStatus::INVALID_ARGS));

@@ -452,20 +452,18 @@ void BlockTreeCacheMetricsReporter::reportQueueWaitMetric(bool        callback,
     } catch (...) {}
 }
 
-void BlockTreeCacheMetricsReporter::reportQueueBacklog(BlockTreeTaskPool& task_pool, const char* pool_type) const {
+void BlockTreeCacheMetricsReporter::reportQueueBacklog(const BlockTreeQueueSizes& queue_sizes,
+                                                       const char*                pool_type) const {
     if (!enabled()) {
         return;
     }
     RtpLLMCacheTransferMetricsCollector collector;
-    {
-        std::lock_guard<std::mutex> lock(task_pool.lifecycle_mutex_);
-        collector.load_queue_backlog       = task_pool.load_queue_.size();
-        collector.background_queue_backlog = task_pool.background_queue_.size();
-        collector.completion_queue_backlog = task_pool.completion_queue_.size();
-    }
-    collector.pool_type            = pool_type;
-    collector.report_transfer      = false;
-    collector.report_queue_backlog = true;
+    collector.load_queue_backlog       = queue_sizes.load;
+    collector.background_queue_backlog = queue_sizes.background;
+    collector.completion_queue_backlog = queue_sizes.completion;
+    collector.pool_type                = pool_type;
+    collector.report_transfer          = false;
+    collector.report_queue_backlog     = true;
     metrics_reporter_->report<RtpLLMCacheTransferMetrics, RtpLLMCacheTransferMetricsCollector>(nullptr, &collector);
 }
 
