@@ -124,11 +124,7 @@ public:
                                             bool                   callback,
                                             int64_t                begin_time_us,
                                             bool                   report_latency = true) noexcept;
-    int64_t reportTransferQueueWaitStarted(Tier source_tier, Tier target_tier) noexcept;
-    void    reportTransferQueueWaitFinished(Tier    source_tier,
-                                            Tier    target_tier,
-                                            int64_t begin_time_us,
-                                            bool    report_latency = true) noexcept;
+    void    reportTransferQueueWait(Tier source_tier, Tier target_tier, int64_t latency_us) noexcept;
     void    reportStorePublish(Tier target_tier, size_t accepted_blocks, size_t duplicate_blocks) const;
     void    reportQueueBacklog(const BlockTreeQueueSizes& queue_sizes, const char* pool_type) const;
 

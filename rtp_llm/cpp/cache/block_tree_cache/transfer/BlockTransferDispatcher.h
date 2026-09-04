@@ -12,7 +12,6 @@ namespace rtp_llm {
 
 class MultiRankBlockTransferEngine;
 class PerRankBlockTransferEngine;
-class BlockTreeCacheMetricsReporter;
 struct BlockTreeQueueSizes;
 
 namespace block_tree_cache_test {
@@ -42,7 +41,7 @@ public:
 
     void cancelPendingStagingTransfers() const;
     void shutdown() const;
-    void setMetricsReporter(BlockTreeCacheMetricsReporter* metrics_reporter) const;
+    void setQueueWaitReporter(TransferQueueWaitReporter reporter) const;
 
     BlockTreeQueueSizes queueSizes() const;
 

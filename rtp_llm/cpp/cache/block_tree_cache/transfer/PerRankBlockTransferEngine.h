@@ -14,8 +14,6 @@
 
 namespace rtp_llm {
 
-class BlockTreeCacheMetricsReporter;
-
 namespace block_tree_cache_test {
 class BlockTreeCacheTestPeer;
 }
@@ -38,7 +36,7 @@ public:
     void                                  cancelPendingStagingTransfers();
     void                                  stopAdmission();
     void                                  shutdown();
-    void                                  setMetricsReporter(BlockTreeCacheMetricsReporter* metrics_reporter);
+    void                                  setQueueWaitReporter(TransferQueueWaitReporter reporter);
     BlockTreeQueueSizes                   queueSizes() const;
 
     size_t transferWorkerCount() const {
@@ -64,7 +62,7 @@ private:
     size_t                                      transfer_worker_count_{4};
     int                                         host_queue_wait_timeout_ms_{10000};
     int                                         disk_queue_wait_timeout_ms_{30000};
-    BlockTreeCacheMetricsReporter*              metrics_reporter_{nullptr};
+    TransferQueueWaitReporter                   queue_wait_reporter_;
 };
 
 using PerRankBlockTransferEnginePtr = std::shared_ptr<PerRankBlockTransferEngine>;

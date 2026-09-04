@@ -132,7 +132,13 @@ BlockTreeCache::~BlockTreeCache() {
 
 void BlockTreeCache::setMetricsReporter(const std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter) {
     metrics_reporter_.setMetricsReporter(metrics_reporter);
-    transfer_dispatcher_->setMetricsReporter(&metrics_reporter_);
+    TransferQueueWaitReporter queue_wait_reporter;
+    if (metrics_reporter != nullptr) {
+        queue_wait_reporter = [this](Tier source_tier, Tier target_tier, int64_t latency_us) {
+            metrics_reporter_.reportTransferQueueWait(source_tier, target_tier, latency_us);
+        };
+    }
+    transfer_dispatcher_->setQueueWaitReporter(std::move(queue_wait_reporter));
 }
 
 bool BlockTreeCache::executeTransfer(const std::vector<TransferDescriptor>& descriptors) {

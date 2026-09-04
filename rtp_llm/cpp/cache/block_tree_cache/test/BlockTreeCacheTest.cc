@@ -336,6 +336,28 @@ TEST(BlockTreeCacheMetricsTest, BusinessQueueWaitReportsQpsLatencyOperationAndPo
     EXPECT_EQ(metricSeriesCount(transfer_metrics->transfer_in_flight_metric), 0u);
 }
 
+TEST(BlockTreeCacheMetricsTest, TransferQueueWaitReportsLatencyAndDirection) {
+    kmonitor::MetricsTags                      tags;
+    std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter =
+        std::make_shared<kmonitor::MetricsReporter>("", "", tags);
+    BlockTreeCacheMetricsReporter reporter;
+    reporter.setMetricsReporter(metrics_reporter);
+
+    reporter.reportTransferQueueWait(Tier::HOST, Tier::DISK, 17);
+
+    RtpLLMCacheTransferMetrics* transfer_metrics = metrics_reporter->getMetricsGroup<RtpLLMCacheTransferMetrics>();
+    ASSERT_NE(transfer_metrics, nullptr);
+    kmonitor::MetricsTags queue_wait_tags("pool_type", "transfer");
+    queue_wait_tags.AddTag("source_tier", "HOST");
+    queue_wait_tags.AddTag("target_tier", "DISK");
+    EXPECT_EQ(metricSeriesCount(transfer_metrics->transfer_task_queue_wait_latency_us_metric), 1u);
+    EXPECT_DOUBLE_EQ(snapshotQps(transfer_metrics->transfer_task_queue_wait_latency_us_metric, queue_wait_tags), 17);
+    EXPECT_EQ(metricSeriesCount(transfer_metrics->task_queue_waiting_tasks_metric), 1u);
+    EXPECT_DOUBLE_EQ(snapshotQps(transfer_metrics->task_queue_waiting_tasks_metric, queue_wait_tags), 1);
+    EXPECT_EQ(metricSeriesCount(transfer_metrics->callback_queue_wait_latency_us_metric), 0u);
+    EXPECT_EQ(metricSeriesCount(transfer_metrics->callback_queue_waiting_tasks_metric), 0u);
+}
+
 TEST(BlockTreeCacheMetricsTest, QueueBacklogReportsLoadBackgroundCompletionAndNormal) {
     kmonitor::MetricsTags                      tags;
     std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter =

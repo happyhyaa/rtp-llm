@@ -402,29 +402,17 @@ void BlockTreeCacheMetricsReporter::reportBusinessQueueWaitFinished(CacheTransfe
                           currentTimeUs() - begin_time_us);
 }
 
-int64_t BlockTreeCacheMetricsReporter::reportTransferQueueWaitStarted(Tier source_tier, Tier target_tier) noexcept {
-    if (!enabled()) {
-        return 0;
-    }
-    const int index = transferDirectionIndex(source_tier, target_tier);
-    if (index < 0) {
-        return 0;
-    }
-    return currentTimeUs();
-}
-
-void BlockTreeCacheMetricsReporter::reportTransferQueueWaitFinished(Tier    source_tier,
-                                                                    Tier    target_tier,
-                                                                    int64_t begin_time_us,
-                                                                    bool    report_latency) noexcept {
-    if (begin_time_us == 0 || !report_latency) {
+void BlockTreeCacheMetricsReporter::reportTransferQueueWait(Tier    source_tier,
+                                                            Tier    target_tier,
+                                                            int64_t latency_us) noexcept {
+    if (latency_us < 0) {
         return;
     }
     const int index = transferDirectionIndex(source_tier, target_tier);
     if (index < 0) {
         return;
     }
-    reportQueueWaitMetric(false, "transfer", nullptr, source_tier, target_tier, currentTimeUs() - begin_time_us);
+    reportQueueWaitMetric(false, "transfer", nullptr, source_tier, target_tier, latency_us);
 }
 
 void BlockTreeCacheMetricsReporter::reportQueueWaitMetric(bool        callback,
