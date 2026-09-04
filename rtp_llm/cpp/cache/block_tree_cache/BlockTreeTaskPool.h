@@ -26,10 +26,6 @@ struct BlockTreeQueueSizes {
     size_t load{0};
     size_t background{0};
     size_t completion{0};
-
-    size_t normal() const {
-        return load + background;
-    }
 };
 
 class BlockTreeTaskPool {

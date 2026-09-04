@@ -111,7 +111,6 @@ TEST(BlockTreeTaskPoolTest, ShutdownClearsPopulatedQueuesAndReclaimsPending) {
     EXPECT_EQ(queue_sizes.load, 1);
     EXPECT_EQ(queue_sizes.background, 1);
     EXPECT_EQ(queue_sizes.completion, 1);
-    EXPECT_EQ(queue_sizes.normal(), 2);
 
     // shutdown() clears the queues under the lock, then joins the worker, so run
     // it on another thread and release the worker only after the clear is

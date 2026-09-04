@@ -358,7 +358,7 @@ TEST(BlockTreeCacheMetricsTest, TransferQueueWaitReportsLatencyAndDirection) {
     EXPECT_EQ(metricSeriesCount(transfer_metrics->callback_queue_waiting_tasks_metric), 0u);
 }
 
-TEST(BlockTreeCacheMetricsTest, QueueBacklogReportsLoadBackgroundCompletionAndNormal) {
+TEST(BlockTreeCacheMetricsTest, QueueBacklogReportsLoadBackgroundAndCompletion) {
     kmonitor::MetricsTags                      tags;
     std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter =
         std::make_shared<kmonitor::MetricsReporter>("", "", tags);
@@ -391,11 +391,10 @@ TEST(BlockTreeCacheMetricsTest, QueueBacklogReportsLoadBackgroundCompletionAndNo
         queue_tags.AddTag("queue_type", queue_type);
         return snapshotQps(transfer_metrics->task_queue_backlog_metric, queue_tags);
     };
-    EXPECT_EQ(metricSeriesCount(transfer_metrics->task_queue_backlog_metric), 4u);
+    EXPECT_EQ(metricSeriesCount(transfer_metrics->task_queue_backlog_metric), 3u);
     EXPECT_DOUBLE_EQ(backlog("load"), 2);
     EXPECT_DOUBLE_EQ(backlog("background"), 3);
     EXPECT_DOUBLE_EQ(backlog("completion"), 4);
-    EXPECT_DOUBLE_EQ(backlog("normal"), 5);
 }
 
 TEST(BlockTreeCacheMetricsTest, LoadJoinMetricsKeepRequestAndDependencyGranularity) {

@@ -567,7 +567,6 @@ void RtpLLMCacheTransferMetrics::report(const kmonitor::MetricsTags*         tag
         report_backlog("load", collector->load_queue_backlog);
         report_backlog("background", collector->background_queue_backlog);
         report_backlog("completion", collector->completion_queue_backlog);
-        report_backlog("normal", collector->load_queue_backlog + collector->background_queue_backlog);
     }
     if (collector->report_task_queue || collector->report_callback_queue) {
         kmonitor::MetricsTags queue_tags("pool_type", collector->pool_type);
