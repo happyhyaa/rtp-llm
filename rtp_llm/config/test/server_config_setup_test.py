@@ -121,7 +121,7 @@ class GenerateConfigTest(TestCase):
         config = PyEnvConfigs().kv_cache_config
 
         self.assertFalse(config.enable_host_cache)
-        self.assertEqual(config.disk_cache_staging_block_count, 4)
+        self.assertEqual(config.disk_cache_staging_block_count, 128)
         self.assertEqual(config.device_eviction_policy, "lru")
         self.assertEqual(config.host_eviction_policy, "lru")
         self.assertEqual(config.disk_eviction_policy, "fifo")

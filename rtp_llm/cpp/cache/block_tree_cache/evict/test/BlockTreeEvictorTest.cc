@@ -290,11 +290,10 @@ public:
         EvictionPolicy                    disk_policy               = EvictionPolicy::FIFO,
         BlockTreeEvictor::IsTierEnabledFn is_tier_enabled           = [](Tier) { return true; },
         BlockTreeTaskPool*                task_pool                 = nullptr,
-        size_t                            max_device_host_batch     = 8,
-        size_t                            max_non_device_host_batch = 16) {
+        size_t                            max_descriptors_per_batch = 8) {
         transfer_engine_     = std::make_shared<ScriptedTransferEngine>(tree->groupSets(), false);
         transfer_dispatcher_ = std::make_unique<BlockTransferDispatcher>(
-            transfer_engine_, nullptr, max_device_host_batch, max_non_device_host_batch);
+            transfer_engine_, nullptr, max_descriptors_per_batch);
         return std::make_unique<BlockTreeEvictor>(tree,
                                                   device_policy,
                                                   host_policy,
@@ -305,8 +304,7 @@ public:
                                                   mutex_,
                                                   BlockTreeTaskPool::kDefaultQueueWaitTimeout.count(),
                                                   BlockTreeTaskPool::kDefaultQueueWaitTimeout.count(),
-                                                  max_device_host_batch,
-                                                  max_non_device_host_batch,
+                                                  max_descriptors_per_batch,
                                                   std::move(is_tier_enabled),
                                                   [](bool, bool) {});
     }
@@ -566,8 +564,7 @@ public:
             cache_mutex_,
             BlockTreeTaskPool::kDefaultQueueWaitTimeout.count(),
             BlockTreeTaskPool::kDefaultQueueWaitTimeout.count(),
-            /*max_device_host_batch=*/8,
-            /*max_non_device_host_batch=*/16,
+            /*max_descriptors_per_batch=*/8,
             [](Tier) { return true; },
             [this](bool tree_data_mutated, bool check_watermark) {
                 {
@@ -815,8 +812,7 @@ void verifyMixedDetachedBatchSettlement(bool transfer_success) {
         cache_mutex,
         BlockTreeTaskPool::kDefaultQueueWaitTimeout.count(),
         BlockTreeTaskPool::kDefaultQueueWaitTimeout.count(),
-        /*max_device_host_batch=*/8,
-        /*max_non_device_host_batch=*/16,
+        /*max_descriptors_per_batch=*/8,
         [](Tier) { return true; },
         [&](bool tree_data_mutated, bool check_watermark) {
             std::lock_guard<std::mutex> lock(settled_mutex);
@@ -1407,8 +1403,7 @@ TEST_F(BlockTreeEvictorTest, DeviceHostWatermarkCapsBatchByRemainingRequiredCoun
         EvictionPolicy::FIFO,
         [](Tier) { return true; },
         &task_pool,
-        /*max_device_host_batch=*/4,
-        /*max_non_device_host_batch=*/16);
+        /*max_descriptors_per_batch=*/4);
 
     for (int64_t key = 100; key < 900; key += 100) {
         const MultiNodeBlocks blocks = allocateDeviceBlocksForTest(*group_, 1, BlockTreeRefType::CACHE);
@@ -1449,8 +1444,7 @@ TEST_F(BlockTreeEvictorTest, DeviceHostWatermarkSubmitsOneLogicalBatchCappedByTr
         EvictionPolicy::FIFO,
         [](Tier) { return true; },
         &task_pool,
-        /*max_device_host_batch=*/2,
-        /*max_non_device_host_batch=*/16);
+        /*max_descriptors_per_batch=*/2);
 
     for (int64_t key : {100, 200, 300}) {
         const MultiNodeBlocks blocks = allocateDeviceBlocksForTest(*group_, 1, BlockTreeRefType::CACHE);
@@ -1506,8 +1500,7 @@ TEST_F(BlockTreeEvictorTest, DirectDeviceDropsConvergePastTransferBatchLimit) {
         EvictionPolicy::FIFO,
         [](Tier) { return true; },
         &task_pool,
-        /*max_device_host_batch=*/8,
-        /*max_non_device_host_batch=*/16);
+        /*max_descriptors_per_batch=*/8);
 
     for (int64_t key = 100; key < 1900; key += 100) {
         const MultiNodeBlocks device_blocks = allocateDeviceBlocksForTest(*group_, 1, BlockTreeRefType::CACHE);
@@ -1581,8 +1574,7 @@ TEST_F(BlockTreeEvictorTest, DeviceWatermarkStaysTriggeredAcrossBatchesUntilLow)
         EvictionPolicy::FIFO,
         [](Tier) { return true; },
         &task_pool,
-        /*max_device_host_batch=*/2,
-        /*max_non_device_host_batch=*/16);
+        /*max_descriptors_per_batch=*/2);
 
     for (int64_t key = 100; key < 900; key += 100) {
         const MultiNodeBlocks blocks = allocateDeviceBlocksForTest(*group_, 1, BlockTreeRefType::CACHE);
@@ -1684,10 +1676,11 @@ TEST_F(BlockTreeEvictorTest, HostDiskWatermarkConvergesAcrossBoundedBatches) {
     };
     evictor_runtime_.transferEngine()->enqueue(true);
     evictor_runtime_.transferEngine()->enqueue(true);
+    evictor_runtime_.transferEngine()->enqueue(true);
     evictor_->scheduleWatermarkEvictionsLocked(Tier::HOST, watermark);
     task_pool.waitForIdle();
 
-    EXPECT_EQ(evictor_runtime_.transferEngine()->submittedBatchCount(), 2u);
+    EXPECT_EQ(evictor_runtime_.transferEngine()->submittedBatchCount(), 3u);
     EXPECT_EQ(evictor_runtime_.transferEngine()->submittedDescriptorCount(), 17u);
     EXPECT_EQ(host_pool->usedBlocksNum(), 78u);
     EXPECT_EQ(disk_pool->usedBlocksNum(), 17u);

@@ -71,12 +71,7 @@ size_t transferBatchCount(const std::vector<TransferDescriptor>& descriptors, co
 
     size_t batch_count = 0;
     for (const auto& [key, descriptor_count] : groups) {
-        const Tier source = std::get<0>(key);
-        const Tier target = std::get<1>(key);
-        const bool device_host_direction =
-            (source == Tier::DEVICE && target == Tier::HOST) || (source == Tier::HOST && target == Tier::DEVICE);
-        const size_t batch_limit = device_host_direction ? config.max_descriptors_per_transfer_batch :
-                                                           config.max_descriptors_per_non_device_host_transfer_batch;
+        const size_t batch_limit = config.max_descriptors_per_transfer_batch;
         batch_count += (descriptor_count + batch_limit - 1) / batch_limit;
     }
     return batch_count;
@@ -611,7 +606,6 @@ TEST_F(BlockTreeCacheIntegrationTest, WatermarkChecksLowerTierBeforeUpperTier) {
     config.watermark_host                                     = {/*low_ratio=*/0.01, /*high_ratio=*/0.02};
     config.task_pool_size                                     = 1;
     config.max_descriptors_per_transfer_batch                 = 1;
-    config.max_descriptors_per_non_device_host_transfer_batch = 1;
 
     std::vector<GroupSetPtr> groups{group};
     auto                     cache = makeBlockTreeCacheForTest(std::move(groups), config);

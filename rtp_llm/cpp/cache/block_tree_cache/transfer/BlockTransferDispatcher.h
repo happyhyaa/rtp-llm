@@ -26,8 +26,7 @@ public:
 
     BlockTransferDispatcher(std::shared_ptr<PerRankBlockTransferEngine>   per_rank_engine,
                             std::shared_ptr<MultiRankBlockTransferEngine> multi_rank_engine = nullptr,
-                            size_t                                        max_device_host_descriptors_per_batch = 8,
-                            size_t max_non_device_host_descriptors_per_batch                                    = 16);
+                            size_t                                        max_descriptors_per_batch = 8);
     ~BlockTransferDispatcher();
 
     std::shared_ptr<AsyncContext> executePerRank(TransferTask task) const;
@@ -49,8 +48,7 @@ private:
 
     std::shared_ptr<PerRankBlockTransferEngine>   per_rank_engine_;
     std::shared_ptr<MultiRankBlockTransferEngine> multi_rank_engine_;
-    size_t                                        max_device_host_descriptors_per_batch_{8};
-    size_t                                        max_non_device_host_descriptors_per_batch_{16};
+    size_t                                        max_descriptors_per_batch_{8};
     mutable std::mutex                            completion_mutex_;
     mutable std::vector<std::shared_future<void>>  transfer_completions_;
     std::function<void()>                         drain_observer_for_test_;

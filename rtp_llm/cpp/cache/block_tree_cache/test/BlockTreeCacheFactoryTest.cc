@@ -1605,9 +1605,8 @@ TEST_F(BlockTreeCacheFactoryTest, CreatesDiskCacheWithoutHostCache) {
     EXPECT_TRUE(cache->isDiskCacheEnabled());
     EXPECT_EQ(cache->config().task_pool_size, 4);
     EXPECT_EQ(cache->config().transfer_worker_count, 4u);
-    EXPECT_EQ(cache->config().device_disk_staging_block_count, 4u);
+    EXPECT_EQ(cache->config().device_disk_staging_block_count, 128u);
     EXPECT_EQ(cache->config().max_descriptors_per_transfer_batch, 8u);
-    EXPECT_EQ(cache->config().max_descriptors_per_non_device_host_transfer_batch, 16u);
     EXPECT_DOUBLE_EQ(cache->config().watermark_device.low_ratio, 0.82);
     EXPECT_DOUBLE_EQ(cache->config().watermark_device.high_ratio, 0.90);
     EXPECT_DOUBLE_EQ(cache->config().watermark_host.low_ratio, 0.0);
