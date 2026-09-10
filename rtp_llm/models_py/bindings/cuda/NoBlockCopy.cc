@@ -269,7 +269,7 @@ BatchedMemoryCopyStatus execBatchedMemoryCopy(const BatchedMemoryCopyParams& par
         std::call_once(driver_warning_once, [driver_version, min_batch_driver_version] {
             RTP_LLM_LOG_WARNING(
                 "execBatchedMemoryCopy unavailable: compile-time CUDART_VERSION=%d requires driver API version "
-                ">=%d for its cudaMemcpyBatchAsync ABI, installed driver API version=%d; falling back to generic "
+                ">=%d for its cudaMemcpy3DBatchAsync ABI, installed driver API version=%d; falling back to generic "
                 "copy",
                 CUDART_VERSION,
                 min_batch_driver_version,
@@ -282,14 +282,14 @@ BatchedMemoryCopyStatus execBatchedMemoryCopy(const BatchedMemoryCopyParams& par
     const auto runtime_version_error = cudaRuntimeGetVersion(&runtime_version);
     if (runtime_version_error != cudaSuccess) {
         RTP_LLM_LOG_WARNING("execBatchedMemoryCopy unavailable: compile-time CUDART_VERSION=%d, failed to query "
-                            "runtime version (%s); cannot prove cudaMemcpyBatchAsync ABI compatibility",
+                            "runtime version (%s); cannot prove cudaMemcpy3DBatchAsync ABI compatibility",
                             CUDART_VERSION,
                             cudaGetErrorString(runtime_version_error));
         return BatchedMemoryCopyStatus::NOT_SUPPORTED;
     }
     if (runtime_version < 12080) {
         RTP_LLM_LOG_WARNING("execBatchedMemoryCopy unavailable: compile-time CUDART_VERSION=%d, runtime version=%d "
-                            "predates cudaMemcpyBatchAsync; falling back to generic copy",
+                            "predates cudaMemcpy3DBatchAsync; falling back to generic copy",
                             CUDART_VERSION,
                             runtime_version);
         return BatchedMemoryCopyStatus::NOT_SUPPORTED;
@@ -298,7 +298,7 @@ BatchedMemoryCopyStatus execBatchedMemoryCopy(const BatchedMemoryCopyParams& par
     const bool runtime_uses_cuda13_batch_abi  = runtime_version >= 13000;
     if (compiled_with_cuda13_batch_abi != runtime_uses_cuda13_batch_abi) {
         RTP_LLM_LOG_WARNING("execBatchedMemoryCopy unavailable: compile-time CUDART_VERSION=%d and runtime version=%d "
-                            "use incompatible cudaMemcpyBatchAsync signatures; falling back to generic copy",
+                            "use incompatible cudaMemcpy3DBatchAsync signatures; falling back to generic copy",
                             CUDART_VERSION,
                             runtime_version);
         return BatchedMemoryCopyStatus::NOT_SUPPORTED;
@@ -307,49 +307,43 @@ BatchedMemoryCopyStatus execBatchedMemoryCopy(const BatchedMemoryCopyParams& par
     check_cuda_value(cudaSetDevice(params.device_index));
     auto stream = getNoBlockCopyStream().stream();
 
-    const size_t             tile_num = params.tiles.size();
-    std::vector<void*>       dsts;
-    std::vector<const void*> srcs;
-    std::vector<size_t>      sizes;
-    dsts.reserve(tile_num);
-    srcs.reserve(tile_num);
-    sizes.reserve(tile_num);
+    std::vector<cudaMemcpy3DBatchOp> ops;
+    ops.reserve(params.tiles.size());
     for (const auto& tile : params.tiles) {
         if (tile.dst == nullptr || tile.src == nullptr || tile.bytes == 0) {
             continue;
         }
-        dsts.push_back(tile.dst);
-        srcs.push_back(tile.src);
-        sizes.push_back(tile.bytes);
+        // Preserve one operation per tile; do not merge rows, layers or descriptors.
+        cudaMemcpy3DBatchOp op{};
+        op.src.type               = cudaMemcpyOperandTypePointer;
+        op.src.op.ptr.ptr         = const_cast<void*>(tile.src);
+        op.src.op.ptr.rowLength   = tile.bytes;
+        op.src.op.ptr.layerHeight = 1;
+        op.dst.type               = cudaMemcpyOperandTypePointer;
+        op.dst.op.ptr.ptr         = tile.dst;
+        op.dst.op.ptr.rowLength   = tile.bytes;
+        op.dst.op.ptr.layerHeight = 1;
+        op.extent                 = {tile.bytes, 1, 1};
+        op.srcAccessOrder         = cudaMemcpySrcAccessOrderStream;
+        ops.push_back(op);
     }
-    if (dsts.empty()) {
+    if (ops.empty()) {
         return BatchedMemoryCopyStatus::SUCCESS;
     }
 
     RTP_LLM_LOG_DEBUG("execBatchedMemoryCopy phase=submit device=%d stream=%p tiles=%zu",
                       params.device_index,
                       static_cast<void*>(stream),
-                      dsts.size());
+                      ops.size());
 
-    cudaMemcpyAttributes attr{};
-    attr.srcAccessOrder = cudaMemcpySrcAccessOrderStream;
-    size_t attr_idx     = 0;
-    // cuMemcpyBatchAsync_v2 in the deployed CUDA stack is not safe under
-    // concurrent host submissions. Protect only the runtime API entry; each
-    // call keeps its own stream and completion wait, so transfers may overlap.
+    // Preserve the existing API-entry serialization for an API-only comparison.
+    // Each call keeps its own stream and completion wait, so transfers may overlap.
     std::unique_lock<std::mutex> submit_lock(cudaBatchSubmitMutex(params.device_index));
 #if CUDART_VERSION >= 13000
-    const auto submit_error =
-        cudaMemcpyBatchAsync(dsts.data(), srcs.data(), sizes.data(), dsts.size(), &attr, &attr_idx, 1, stream);
+    const auto submit_error = cudaMemcpy3DBatchAsync(ops.size(), ops.data(), 0, stream);
 #else
-    std::vector<void*> mutable_srcs;
-    mutable_srcs.reserve(srcs.size());
-    for (auto* src : srcs) {
-        mutable_srcs.push_back(const_cast<void*>(src));
-    }
     size_t     fail_idx     = 0;
-    const auto submit_error = cudaMemcpyBatchAsync(
-        dsts.data(), mutable_srcs.data(), sizes.data(), dsts.size(), &attr, &attr_idx, 1, &fail_idx, stream);
+    const auto submit_error = cudaMemcpy3DBatchAsync(ops.size(), ops.data(), &fail_idx, 0, stream);
 #endif
     submit_lock.unlock();
     if (submit_error != cudaSuccess) {
@@ -357,7 +351,7 @@ BatchedMemoryCopyStatus execBatchedMemoryCopy(const BatchedMemoryCopyParams& par
                             "error=%s",
                             params.device_index,
                             static_cast<void*>(stream),
-                            dsts.size(),
+                            ops.size(),
                             static_cast<int>(submit_error),
                             cudaGetErrorString(submit_error));
         return BatchedMemoryCopyStatus::EXECUTION_FAILED;
@@ -366,7 +360,7 @@ BatchedMemoryCopyStatus execBatchedMemoryCopy(const BatchedMemoryCopyParams& par
     RTP_LLM_LOG_DEBUG("execBatchedMemoryCopy phase=submitted device=%d stream=%p tiles=%zu",
                       params.device_index,
                       static_cast<void*>(stream),
-                      dsts.size());
+                      ops.size());
 
     const auto completion_error = cudaStreamSynchronize(stream);
     if (completion_error != cudaSuccess) {
@@ -374,7 +368,7 @@ BatchedMemoryCopyStatus execBatchedMemoryCopy(const BatchedMemoryCopyParams& par
                             "error_code=%d error=%s",
                             params.device_index,
                             static_cast<void*>(stream),
-                            dsts.size(),
+                            ops.size(),
                             static_cast<int>(completion_error),
                             cudaGetErrorString(completion_error));
         return BatchedMemoryCopyStatus::EXECUTION_FAILED;
@@ -382,7 +376,7 @@ BatchedMemoryCopyStatus execBatchedMemoryCopy(const BatchedMemoryCopyParams& par
     RTP_LLM_LOG_DEBUG("execBatchedMemoryCopy phase=completed device=%d stream=%p tiles=%zu",
                       params.device_index,
                       static_cast<void*>(stream),
-                      dsts.size());
+                      ops.size());
     // cudaStreamSynchronize already reports deferred errors from this batch.
     // Do not call check_cuda_error() here: in DEBUG mode it performs a
     // device-wide synchronize and can wait on unrelated TP/NCCL work.

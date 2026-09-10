@@ -79,7 +79,7 @@ struct StagedMemoryCopyScratch {
 void execNoBlockCopy(const MultiCopyParams& params);
 
 // One CUDA runtime call copy executor for regular host/device pointers.
-// CUDA 12.8+ uses cudaMemcpyBatchAsync to avoid per-tile cudaMemcpyAsync launches.
+// CUDA 12.8+ uses cudaMemcpy3DBatchAsync with one {bytes, 1, 1} operation per tile.
 // Only NOT_SUPPORTED permits the caller to fall back to another strategy;
 // EXECUTION_FAILED means a CUDA call was attempted and failed.
 BatchedMemoryCopyStatus execBatchedMemoryCopy(const BatchedMemoryCopyParams& params);
