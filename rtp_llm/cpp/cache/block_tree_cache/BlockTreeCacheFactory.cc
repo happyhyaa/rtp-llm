@@ -597,7 +597,6 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
                                                      config.device_disk_staging_block_count,
                                                      config.max_descriptors_per_transfer_batch,
                                                      config.transfer_worker_count,
-                                                     config.max_descriptors_per_non_device_host_transfer_batch,
                                                      config.transfer_queue_max_size,
                                                      cache_metrics_reporter);
     std::shared_ptr<MultiRankBlockTransferEngine> multi_rank_engine;
@@ -607,8 +606,7 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
     auto transfer_dispatcher =
         std::make_unique<BlockTransferDispatcher>(std::move(per_rank_engine),
                                                   std::move(multi_rank_engine),
-                                                  config.max_descriptors_per_transfer_batch,
-                                                  config.max_descriptors_per_non_device_host_transfer_batch);
+                                                  config.max_descriptors_per_transfer_batch);
     const size_t business_queue_size = config.business_queue_max_size == 0 ?
                                            0 :
                                            config.business_queue_max_size + BlockTreeTaskPool::kLoadReservedSlots;

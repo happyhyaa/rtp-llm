@@ -39,7 +39,6 @@ BlockTreeCache::BlockTreeCache(std::unique_ptr<BlockTree>                     tr
         config_.host_cache_sync_timeout_ms,
         config_.disk_cache_sync_timeout_ms,
         config_.max_descriptors_per_transfer_batch,
-        config_.max_descriptors_per_non_device_host_transfer_batch,
         [this](Tier tier) { return config_.isTierEnabled(tier); },
         [this](bool tree_data_mutated, bool check_watermark) {
             onWorkflowSettledLocked(tree_data_mutated, check_watermark);

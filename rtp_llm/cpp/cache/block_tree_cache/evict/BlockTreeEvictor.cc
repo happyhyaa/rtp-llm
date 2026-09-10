@@ -29,8 +29,7 @@ BlockTreeEvictor::BlockTreeEvictor(BlockTree*                     tree,
                                    std::mutex&                    mutex,
                                    int                            host_timeout_ms,
                                    int                            disk_timeout_ms,
-                                   size_t                         max_device_host_batch,
-                                   size_t                         max_non_device_host_batch,
+                                   size_t                         max_descriptors_per_batch,
                                    IsTierEnabledFn                is_tier_enabled,
                                    SettledFn                      settled):
     tree_(tree),
@@ -42,8 +41,7 @@ BlockTreeEvictor::BlockTreeEvictor(BlockTree*                     tree,
     task_runner_(std::make_unique<EvictionTaskRunner>(tree->groupSets(), transfer_dispatcher)),
     host_timeout_ms_(host_timeout_ms),
     disk_timeout_ms_(disk_timeout_ms),
-    max_device_host_batch_(max_device_host_batch),
-    max_non_device_host_batch_(max_non_device_host_batch) {
+    max_descriptors_per_batch_(max_descriptors_per_batch) {
     // GroupSetFactory has already validated that group_set_id equals the vector
     // position. Own one heap per (group resource, tier).
     heaps_.resize(tree_->groupSets().size());
@@ -520,13 +518,13 @@ Tier BlockTreeEvictor::watermarkTargetTier(Tier source_tier) const {
 
 size_t BlockTreeEvictor::watermarkLogicalBatchLimit(Tier source_tier, Tier target_tier) const {
     if (source_tier == Tier::DEVICE && target_tier == Tier::HOST) {
-        return max_device_host_batch_;
+        return max_descriptors_per_batch_;
     }
     if (source_tier == Tier::DEVICE && target_tier == Tier::DISK) {
         return 1;
     }
     if (source_tier == Tier::HOST && target_tier == Tier::DISK) {
-        return max_non_device_host_batch_;
+        return max_descriptors_per_batch_;
     }
     return std::numeric_limits<size_t>::max();
 }
