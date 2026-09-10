@@ -658,9 +658,20 @@ bool BlockTreeCacheTestPeer::ScopedQueueRejectionGuard::restore() {
 }
 
 void BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(const BlockTreeCache& cache) {
-    cache.task_pool_->waitForIdle();
-    cache.transfer_dispatcher_->per_rank_engine_->transfer_task_pool_->waitForIdle();
-    cache.task_pool_->waitForIdle();
+    for (;;) {
+        cache.task_pool_->waitForIdle();
+        cache.transfer_dispatcher_->drainTransfers();
+        cache.transfer_dispatcher_->per_rank_engine_->transfer_task_pool_->waitForIdle();
+        cache.task_pool_->waitForIdle();
+        std::lock_guard<std::mutex> lock(cache.transfer_dispatcher_->completion_mutex_);
+        if (cache.transfer_dispatcher_->transfer_completions_.empty()) {
+            return;
+        }
+    }
+}
+
+void BlockTreeCacheTestPeer::setTransferDrainObserverForTest(BlockTreeCache& cache, std::function<void()> observer) {
+    cache.transfer_dispatcher_->drain_observer_for_test_ = std::move(observer);
 }
 
 bool BlockTreeCacheTestPeer::armQueueRejectionForTest(BlockTreeCache& cache) {

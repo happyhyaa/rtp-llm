@@ -2,7 +2,9 @@
 
 #include <chrono>
 #include <deque>
+#include <future>
 #include <memory>
+#include <stdexcept>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/AsyncContext.h"
@@ -188,6 +190,58 @@ TEST(BlockTransferDispatcherTest, AsynchronousRunTransferGroupsAndWaitsForEveryB
     third->complete(ErrorInfo::OkStatus());
     EXPECT_EQ(callback_count, 1u);
     EXPECT_FALSE(final_error.ok());
+}
+
+TEST(BlockTransferDispatcherTest, DrainWaitsForCallbackReturnNotOnlyContextReadiness) {
+    auto pending = std::make_shared<TransferBatchAsyncContext>();
+    auto engine = std::make_shared<ScriptedPerRankEngine>(std::deque<std::shared_ptr<AsyncContext>>{pending});
+    BlockTransferDispatcher dispatcher(engine);
+    std::promise<void> entered;
+    auto entered_future = entered.get_future();
+    std::promise<void> release;
+    auto released = release.get_future().share();
+    dispatcher.runTransfer(TransferTask({descriptor(0)}, std::chrono::seconds(5)), [&](ErrorInfo error) {
+        EXPECT_TRUE(error.ok());
+        entered.set_value();
+        released.wait();
+    });
+    auto complete = std::async(std::launch::async, [&] { pending->complete(ErrorInfo::OkStatus()); });
+    const auto entered_status = entered_future.wait_for(std::chrono::seconds(5));
+    EXPECT_EQ(entered_status, std::future_status::ready);
+    EXPECT_TRUE(pending->done());
+    auto drain = std::async(std::launch::async, [&] { dispatcher.drainTransfers(); });
+    EXPECT_EQ(drain.wait_for(std::chrono::milliseconds(50)), std::future_status::timeout);
+    release.set_value();
+    EXPECT_EQ(complete.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    EXPECT_EQ(drain.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+}
+
+TEST(BlockTransferDispatcherTest, DrainIncludesNextStageSubmittedByCallback) {
+    auto first = std::make_shared<TransferBatchAsyncContext>();
+    auto second = std::make_shared<TransferBatchAsyncContext>();
+    auto engine = std::make_shared<ScriptedPerRankEngine>(std::deque<std::shared_ptr<AsyncContext>>{first, second});
+    BlockTransferDispatcher dispatcher(engine);
+    bool settled = false;
+    dispatcher.runTransfer(TransferTask({descriptor(0)}, std::chrono::seconds(5)), [&](ErrorInfo) {
+        dispatcher.runTransfer(TransferTask({descriptor(0)}, std::chrono::seconds(5)), [&](ErrorInfo) {
+            settled = true;
+        });
+    });
+    auto drain = std::async(std::launch::async, [&] { dispatcher.drainTransfers(); });
+    first->complete(ErrorInfo::OkStatus());
+    EXPECT_EQ(drain.wait_for(std::chrono::milliseconds(50)), std::future_status::timeout);
+    second->complete(ErrorInfo::OkStatus());
+    EXPECT_EQ(drain.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    EXPECT_TRUE(settled);
+}
+
+TEST(BlockTransferDispatcherTest, ThrowingCallbackDoesNotLeaveDrainPending) {
+    auto engine = std::make_shared<ScriptedPerRankEngine>();
+    BlockTransferDispatcher dispatcher(engine);
+    EXPECT_THROW(dispatcher.runTransfer(TransferTask({descriptor(0)}, std::chrono::seconds(5)),
+                                        [](ErrorInfo) { throw std::runtime_error("callback"); }),
+                 std::runtime_error);
+    dispatcher.drainTransfers();
 }
 
 TEST(BlockTransferDispatcherTest, ExpiredTaskFailsWithoutSubmittingABatch) {

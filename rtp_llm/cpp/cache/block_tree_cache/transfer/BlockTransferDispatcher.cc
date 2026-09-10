@@ -10,6 +10,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/MultiRankBlockTransferEngine.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/PerRankBlockTransferEngine.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferStageState.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 
 namespace rtp_llm {
@@ -34,6 +35,32 @@ BlockTransferDispatcher::BlockTransferDispatcher(std::shared_ptr<PerRankBlockTra
     RTP_LLM_CHECK(max_non_device_host_descriptors_per_batch_ > 0);
 }
 
+BlockTransferDispatcher::~BlockTransferDispatcher() {
+    drainTransfers();
+}
+
+void BlockTransferDispatcher::drainTransfers() const {
+    bool observed = false;
+    for (;;) {
+        std::vector<std::shared_future<void>> completions;
+        {
+            std::lock_guard<std::mutex> lock(completion_mutex_);
+            completions.swap(transfer_completions_);
+        }
+        if (completions.empty()) {
+            return;
+        }
+        if (!observed && drain_observer_for_test_) {
+            observed = true;
+            drain_observer_for_test_();
+        }
+        for (const auto& completion : completions) {
+            completion.wait();
+        }
+        // A callback may have submitted another transfer before returning.
+    }
+}
+
 std::shared_ptr<AsyncContext> BlockTransferDispatcher::executePerRank(TransferTask task) const {
     if (task.expired()) {
         return std::make_shared<CompletedAsyncContext>(
@@ -50,6 +77,22 @@ std::shared_ptr<AsyncContext> BlockTransferDispatcher::executeMultiRank(Transfer
 }
 
 void BlockTransferDispatcher::runTransfer(TransferTask task, TransferDoneCallback callback) const {
+    auto completion = std::make_shared<std::promise<void>>();
+    {
+        std::lock_guard<std::mutex> lock(completion_mutex_);
+        transfer_completions_.erase(
+            std::remove_if(transfer_completions_.begin(), transfer_completions_.end(), [](const auto& future) {
+                return future.wait_for(std::chrono::seconds(0)) == std::future_status::ready;
+            }),
+            transfer_completions_.end());
+        transfer_completions_.push_back(completion->get_future().share());
+    }
+    callback = [completion, done = std::move(callback)](ErrorInfo error) {
+        // Context readiness can precede callback execution. Drain only after
+        // the callback has submitted settlement (also on an exception).
+        block_tree_cache_detail::ScopeRollback completed([&] { completion->set_value(); });
+        done(std::move(error));
+    };
     const auto& descriptors = task.descriptors();
     if (descriptors.empty()) {
         callback(ErrorInfo(ErrorCode::INVALID_PARAMS, "transfer task contains no descriptors"));

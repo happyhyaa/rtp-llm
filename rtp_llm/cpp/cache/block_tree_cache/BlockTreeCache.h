@@ -40,7 +40,6 @@ struct BlockTreeCacheConfig {
     // Compatibility-only settlement barrier. Remote writes wait for their
     // exact backend task; HOST/DISK inserts additionally wait for the entire
     // shared BlockTree task pool. Keep disabled for normal concurrent traffic.
-    bool write_cache_sync{false};
 
     // ---- Per-tier watermark ----
     using TierWatermark = rtp_llm::TierWatermark;
