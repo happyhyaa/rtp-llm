@@ -266,14 +266,14 @@ static void installStrategyRecorders(DeviceHostTransferExecutor& executor, std::
     }
 }
 
-TEST(DeviceHostTransferExecutorConfigTest, PrefersStagedSmThenCudaBatchThenGeneric) {
+TEST(DeviceHostTransferExecutorConfigTest, PrefersCudaBatchThenStagedSmThenGeneric) {
     BlockTreeTaskPool          task_pool(1, 8, "DeviceHostExecutorConfigTest");
     DeviceHostTransferExecutor executor(task_pool, 8);
     EXPECT_TRUE(executor.options_.cuda_batch_copy_enabled);
     EXPECT_TRUE(executor.options_.staged_sm_copy_enabled);
     ASSERT_EQ(executor.strategies_.size(), 3u);
-    EXPECT_NE(dynamic_cast<StagedSmDeviceHostCopyStrategy*>(executor.strategies_[0].get()), nullptr);
-    EXPECT_NE(dynamic_cast<CudaBatchDeviceHostCopyStrategy*>(executor.strategies_[1].get()), nullptr);
+    EXPECT_NE(dynamic_cast<CudaBatchDeviceHostCopyStrategy*>(executor.strategies_[0].get()), nullptr);
+    EXPECT_NE(dynamic_cast<StagedSmDeviceHostCopyStrategy*>(executor.strategies_[1].get()), nullptr);
     EXPECT_NE(dynamic_cast<GenericMultiCopyDeviceHostCopyStrategy*>(executor.strategies_[2].get()), nullptr);
 }
 
@@ -1479,6 +1479,7 @@ TEST_F(PerRankBlockTransferEngineStrategyTest, GenericStrategyRoundTrip) {
 TEST_F(PerRankBlockTransferEngineStrategyTest, BatchStrategyExecutesWhenSupportedOtherwiseFallsBack) {
     DeviceHostCopyOptions options;
     options.cuda_batch_copy_enabled                          = true;
+    options.staged_sm_copy_enabled                           = false;
     auto                            per_rank_transfer_engine = makePerRankBlockTransferEngine(options);
     std::array<StrategyCounters, 3> counters;
     installStrategyRecorders(*per_rank_transfer_engine->device_host_executor_, counters);
@@ -1514,15 +1515,16 @@ TEST_F(PerRankBlockTransferEngineStrategyTest, BatchStrategyExecutesWhenSupporte
         EXPECT_EQ(d1[i], 0x00);
 
     EXPECT_EQ(counters[0].attempts, 2);
-    EXPECT_EQ(counters[0].not_applicable, 2);
-    EXPECT_EQ(counters[0].done, 0);
     EXPECT_EQ(counters[0].failed, 0);
-    EXPECT_EQ(counters[1].attempts, 2);
     EXPECT_EQ(counters[1].failed, 0);
-    if (counters[1].done == 2) {
-        EXPECT_EQ(counters[1].not_applicable, 0);
+    if (counters[0].done == 2) {
+        EXPECT_EQ(counters[0].not_applicable, 0);
+        EXPECT_EQ(counters[1].attempts, 0);
         EXPECT_EQ(counters[2].attempts, 0);
     } else {
+        EXPECT_EQ(counters[0].done, 0);
+        EXPECT_EQ(counters[0].not_applicable, 2);
+        EXPECT_EQ(counters[1].attempts, 2);
         EXPECT_EQ(counters[1].done, 0);
         EXPECT_EQ(counters[1].not_applicable, 2);
         EXPECT_EQ(counters[2].attempts, 2);
@@ -1601,15 +1603,18 @@ TEST_F(PerRankBlockTransferEngineStrategyTest, StagedStrategyAboveThresholdRound
     for (size_t i = 128; i < staged_layer1.size(); ++i)
         EXPECT_EQ(staged_layer1[i], 0x00);
     EXPECT_EQ(counters[0].attempts, 2);
-    EXPECT_EQ(counters[0].done, 2);
+    EXPECT_EQ(counters[0].not_applicable, 2);
+    EXPECT_EQ(counters[0].done, 0);
     EXPECT_EQ(counters[0].failed, 0);
-    EXPECT_EQ(counters[1].attempts, 0);
+    EXPECT_EQ(counters[1].attempts, 2);
+    EXPECT_EQ(counters[1].done, 2);
+    EXPECT_EQ(counters[1].failed, 0);
     EXPECT_EQ(counters[2].attempts, 0);
 
     releasePoolBlock(*host_pool_, host_block);
 }
 
-TEST_F(PerRankBlockTransferEngineStrategyTest, StagedSmTakesPrecedenceWhenBothStrategiesAreEligible) {
+TEST_F(PerRankBlockTransferEngineStrategyTest, CudaBatchPrecedesStagedSmWithStagedFallback) {
     DeviceHostCopyOptions options;
     options.staged_sm_copy_enabled                           = true;
     options.staged_sm_min_tile_count                         = 1;
@@ -1627,10 +1632,18 @@ TEST_F(PerRankBlockTransferEngineStrategyTest, StagedSmTakesPrecedenceWhenBothSt
                  makeDescriptor(Tier::DEVICE, Tier::HOST, device_blocks_, host_block),
                  TransferStatus::OK);
     EXPECT_EQ(counters[0].attempts, 1);
-    EXPECT_EQ(counters[0].done, 1);
-    EXPECT_EQ(counters[0].not_applicable, 0);
     EXPECT_EQ(counters[0].failed, 0);
-    EXPECT_EQ(counters[1].attempts, 0);
+    if (counters[0].done == 1) {
+        EXPECT_EQ(counters[0].not_applicable, 0);
+        EXPECT_EQ(counters[1].attempts, 0);
+    } else {
+        EXPECT_EQ(counters[0].done, 0);
+        EXPECT_EQ(counters[0].not_applicable, 1);
+        EXPECT_EQ(counters[1].attempts, 1);
+        EXPECT_EQ(counters[1].done, 1);
+        EXPECT_EQ(counters[1].not_applicable, 0);
+        EXPECT_EQ(counters[1].failed, 0);
+    }
     EXPECT_EQ(counters[2].attempts, 0);
 
     releasePoolBlock(*host_pool_, host_block);

@@ -263,7 +263,7 @@ TEST_F(PerRankBlockTransferEngineHostDiskTest, MaxBatchSizeSplitsOneLogicalBatch
     EXPECT_EQ(io->batch_sizes, (std::vector<size_t>{2, 2, 1}));
 }
 
-TEST_F(PerRankBlockTransferEngineHostDiskTest, DefaultBatchSizeSupportsSixteenDescriptors) {
+TEST_F(PerRankBlockTransferEngineHostDiskTest, DefaultBatchSizeSplitsSeventeenDescriptorsIntoEightEightOne) {
     auto  owned_io  = std::make_unique<RecordingBatchDiskBlockIO>();
     auto* io        = owned_io.get();
     auto  host_pool = makeHostPool(host_block_size_, 17);
@@ -280,7 +280,7 @@ TEST_F(PerRankBlockTransferEngineHostDiskTest, DefaultBatchSizeSupportsSixteenDe
     context->waitDone();
 
     ASSERT_TRUE(context->success());
-    EXPECT_EQ(io->batch_sizes, (std::vector<size_t>{16, 1}));
+    EXPECT_EQ(io->batch_sizes, (std::vector<size_t>{8, 8, 1}));
 }
 
 TEST_F(PerRankBlockTransferEngineHostDiskTest, SameDirectionHostToDiskTasksMayUseSharedWorkers) {

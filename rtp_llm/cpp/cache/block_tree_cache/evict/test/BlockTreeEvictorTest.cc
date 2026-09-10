@@ -467,7 +467,6 @@ TEST(BlockTreeEvictorAsyncTest, PendingTransferDoesNotOccupyBusinessWorker) {
         BlockTreeTaskPool::kDefaultQueueWaitTimeout.count(),
         BlockTreeTaskPool::kDefaultQueueWaitTimeout.count(),
         8,
-        16,
         [](Tier) { return true; },
         [&](bool, bool) { ++settled_count; });
 
@@ -1486,9 +1485,7 @@ TEST_F(BlockTreeEvictorTest, DeviceHostWatermarkSubmitsOneLogicalBatchCappedByTr
 TEST_F(BlockTreeEvictorTest, DirectDeviceDropsConvergePastTransferBatchLimit) {
     device_pool_ = makeTestDevicePool(20, "direct_device_watermark_convergence");
     ASSERT_NE(device_pool_, nullptr);
-    auto host_pool = makePinnedHostPool(18);
-    ASSERT_NE(host_pool, nullptr);
-    resetGroup(host_pool);
+    resetGroup();
 
     BlockTreeTaskPool task_pool(/*thread_count=*/1, /*queue_size=*/4, "direct_device_watermark_convergence");
     const auto        metrics_reporter = evictor_runtime_.metricsReporter();
@@ -1498,7 +1495,7 @@ TEST_F(BlockTreeEvictorTest, DirectDeviceDropsConvergePastTransferBatchLimit) {
         EvictionPolicy::LRU,
         EvictionPolicy::LRU,
         EvictionPolicy::FIFO,
-        [](Tier) { return true; },
+        [](Tier tier) { return tier == Tier::DEVICE; },
         &task_pool,
         /*max_descriptors_per_batch=*/8);
 
@@ -1506,17 +1503,13 @@ TEST_F(BlockTreeEvictorTest, DirectDeviceDropsConvergePastTransferBatchLimit) {
         const MultiNodeBlocks device_blocks = allocateDeviceBlocksForTest(*group_, 1, BlockTreeRefType::CACHE);
         ASSERT_EQ(device_blocks.size(), 1u);
         ASSERT_EQ(device_blocks.front().size(), 1u);
-        const BlockIdxType host_block = group_->allocateSingleBlock(Tier::HOST, BlockTreeRefType::CACHE);
-        ASSERT_FALSE(isNullBlockIdx(host_block));
 
         GroupSetResource resource = makeResource(Tier::DEVICE, device_blocks.front().front());
-        resource.host_block       = host_block;
         auto result               = insert({key}, {{resource}});
         ASSERT_NE(insertedNode(result), nullptr);
         unreferenceDeviceBlocksForTest(*group_, device_blocks, BlockTreeRefType::CACHE);
     }
     ASSERT_EQ(device_pool_->usedBlocksNum(), 18u);
-    ASSERT_EQ(host_pool->usedBlocksNum(), 18u);
 
     std::vector<std::pair<bool, bool>> settled_events;
     evictor_->settled_ = [&settled_events](bool tree_data_mutated, bool check_watermark) {
@@ -1527,13 +1520,13 @@ TEST_F(BlockTreeEvictorTest, DirectDeviceDropsConvergePastTransferBatchLimit) {
     EXPECT_EQ(evictor_runtime_.transferEngine()->submittedBatchCount(), 0u);
     EXPECT_EQ(evictor_runtime_.transferEngine()->submittedDescriptorCount(), 0u);
     EXPECT_EQ(device_pool_->usedBlocksNum(), 8u);
-    EXPECT_EQ(host_pool->usedBlocksNum(), 18u);
     EXPECT_EQ(device_pool_->referencedBlocksNum(BlockTreeRefType::CACHE), 8u);
-    EXPECT_EQ(host_pool->referencedBlocksNum(BlockTreeRefType::CACHE), 18u);
     EXPECT_EQ(evictor_->candidateStats().device_candidates, 8u);
-    EXPECT_EQ(evictor_->candidateStats().host_candidates, 10u);
-    EXPECT_EQ(tree_->size(), 18u);
-    EXPECT_EQ(settled_events, (std::vector<std::pair<bool, bool>>{{true, false}, {true, false}}));
+    EXPECT_EQ(evictor_->candidateStats().host_candidates, 0u);
+    EXPECT_EQ(tree_->size(), 8u);
+    // Direct drops perform no transfer: all ten releases settle in one round,
+    // even though the transfer descriptor limit is eight.
+    EXPECT_EQ(settled_events, (std::vector<std::pair<bool, bool>>{{true, false}}));
 
     RtpLLMCacheEvictionMetrics* eviction_metrics = metrics_reporter->getMetricsGroup<RtpLLMCacheEvictionMetrics>();
     ASSERT_NE(eviction_metrics, nullptr);

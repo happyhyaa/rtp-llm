@@ -255,8 +255,7 @@ protected:
                                                                        GetParam() == Tier::DISK,
                                                                        {4},
                                                                        2,
-                                                                       nullptr,
-                                                                       false));
+                                                                       nullptr));
         const MultiNodeBlocks sources = allocateDeviceBlocksForTest(*env_->groups[0], keys_.size());
         for (const BlockIndicesType& blocks : sources) {
             request_holds_.push_back(blocks);
@@ -333,6 +332,7 @@ protected:
         const std::shared_ptr<LoadAsyncContext> context = takeLoadContext(result);
         ASSERT_NE(context, nullptr);
         ASSERT_EQ(context->loadDescs().size(), keys_.size());
+        const size_t request_holds_before = request_holds_.size();
         BlockIndicesType target_blocks;
         for (size_t i = 0; i < context->loadDescs().size(); ++i) {
             const MultiNodeBlocks target = allocateDeviceBlocksForTest(*env_->groups[0], 1);
@@ -384,6 +384,13 @@ protected:
             }
             EXPECT_EQ(env_->poolFor(GetParam()).referencedBlocksNum(BlockTreeRefType::CACHE), keys_.size());
             EXPECT_EQ(candidateCountForTier(*env_->cache, GetParam()), 1u);
+            // The caller owns REQUEST refs even when loading fails. Release the
+            // failed destination allocation before the same request retries.
+            for (size_t i = request_holds_before; i < request_holds_.size(); ++i) {
+                releaseDeviceBlocks(*env_->cache, env_->device_pools[0], request_holds_[i]);
+            }
+            request_holds_.resize(request_holds_before);
+            EXPECT_EQ(env_->device_pools[0]->freeBlocksNum(), keys_.size());
         }
     }
 
