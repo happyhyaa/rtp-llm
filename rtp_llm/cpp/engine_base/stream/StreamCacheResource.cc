@@ -123,9 +123,9 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
                               total_blocks,
                               tierName(target_tier));
             if (target_tier != Tier::NONE) {
-                InsertInfo insert_info{
-                    batch_kv_cache_resource_, stream_->completeTokenIdsPtr(), false, target_tier, enableRemoteCache()};
-                resource_context_.cache_manager->insertIntoCache(insert_info);
+                InsertInfo insert_info{batch_kv_cache_resource_, stream_->completeTokenIdsPtr(), false, target_tier};
+                size_t     resident_prefix_length = 0;
+                resource_context_.cache_manager->insertIntoCache(insert_info, resident_prefix_length);
             }
         } else {
             RTP_LLM_LOG_DEBUG("tryReleaseKVBlock: stream=%ld, NOT storing cache, reuseCache=%d, hasError=%d, status=%s",
@@ -504,11 +504,6 @@ bool StreamCacheResource::enableDiskCache() const {
     return resource_context_.enable_disk_cache;
 }
 
-bool StreamCacheResource::enableRemoteCache() const {
-    return resource_context_.enable_remote_cache
-           && (resource_context_.ignore_request_cache_switches || stream_->enableRemoteCache());
-}
-
 bool StreamCacheResource::enableCacheLookup() const {
     const bool any_global_tier = resource_context_.enable_device_cache || resource_context_.enable_host_cache
                                  || resource_context_.enable_disk_cache || resource_context_.enable_remote_cache;
@@ -527,9 +522,6 @@ Tier StreamCacheResource::storeTarget() const {
     }
     if (enableDiskCache()) {
         return Tier::DISK;
-    }
-    if (enableRemoteCache()) {
-        return Tier::REMOTE;
     }
     return Tier::NONE;
 }

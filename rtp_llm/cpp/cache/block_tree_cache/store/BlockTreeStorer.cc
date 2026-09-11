@@ -42,30 +42,27 @@ void BlockTreeStorer::stopAdmissionLocked() {
 StorageWriteTask BlockTreeStorer::storeLocked(const CacheKeysType&                              cache_keys,
                                               const std::vector<std::vector<GroupSetResource>>& resources,
                                               Tier                                              target_tier,
-                                              bool                                              write_remote,
-                                              bool                                              is_resident) {
+                                              bool                                              is_resident,
+                                              size_t& resident_prefix_length) {
+    resident_prefix_length = 0;
     assert(!is_resident || target_tier == Tier::DEVICE);
-    RTP_LLM_CHECK_WITH_INFO(target_tier == Tier::DEVICE || target_tier == Tier::HOST || target_tier == Tier::DISK
-                                || target_tier == Tier::REMOTE,
+    RTP_LLM_CHECK_WITH_INFO(target_tier == Tier::DEVICE || target_tier == Tier::HOST || target_tier == Tier::DISK,
                             "unsupported store target tier: %s",
                             tierName(target_tier));
-    RTP_LLM_CHECK_WITH_INFO(target_tier != Tier::REMOTE || storage_backend_ != nullptr,
-                            "remote store target requires a storage backend");
-    RTP_LLM_CHECK_WITH_INFO(target_tier != Tier::REMOTE || write_remote,
-                            "remote store target requires remote write to be enabled");
     if (target_tier == Tier::DEVICE) {
-        publishDeviceLocked(cache_keys, resources, is_resident);
-    } else if (target_tier == Tier::HOST || target_tier == Tier::DISK) {
+        publishDeviceLocked(cache_keys, resources, is_resident, resident_prefix_length);
+    } else {
         submitLowerTierLocked(cache_keys, resources, target_tier);
+        return {};
     }
-    return write_remote && storage_backend_ ?
-               storage_backend_->prepareWrite(makeStorageRequest(cache_keys, resources)) :
-               StorageWriteTask{};
+    return storage_backend_ ? storage_backend_->prepareWrite(makeStorageRequest(cache_keys, resources)) :
+                              StorageWriteTask{};
 }
 
 void BlockTreeStorer::publishDeviceLocked(const CacheKeysType&                              cache_keys,
                                           const std::vector<std::vector<GroupSetResource>>& resources,
-                                          bool                                              is_resident) {
+                                          bool                                              is_resident,
+                                          size_t&                                           resident_prefix_length) {
     const BlockTreeInsertResult insert_result = tree_->insertNode(cache_keys, resources, false, is_resident);
     const bool tree_data_mutated = !insert_result.inserted_nodes.empty() || !insert_result.adopted_nodes.empty();
     if (tree_data_mutated || !insert_result.newly_resident_nodes.empty()) {
@@ -74,6 +71,7 @@ void BlockTreeStorer::publishDeviceLocked(const CacheKeysType&                  
     if (tree_data_mutated) {
         settled_(true, true);
     }
+    resident_prefix_length = insert_result.resident_prefix_length;
 }
 
 StorageRequest BlockTreeStorer::makeStorageRequest(const CacheKeysType&                              cache_keys,
