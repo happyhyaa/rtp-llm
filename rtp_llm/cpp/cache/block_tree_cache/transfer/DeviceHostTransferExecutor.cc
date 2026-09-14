@@ -1,6 +1,10 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/DeviceHostTransferExecutor.h"
 
+#include <algorithm>
+#include <array>
+#include <cstdlib>
 #include <map>
+#include <string_view>
 #include <utility>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DeviceBlockPool.h"
@@ -19,6 +23,20 @@ DeviceHostTransferExecutor::DeviceHostTransferExecutor(BlockTreeTaskPool&    tra
     strategies_.push_back(std::make_unique<CudaBatchDeviceHostCopyStrategy>());
     strategies_.push_back(std::make_unique<StagedSmDeviceHostCopyStrategy>());
     strategies_.push_back(std::make_unique<GenericMultiCopyDeviceHostCopyStrategy>());
+
+    // Promote only the requested strategy; availability checks remain in tryExecute().
+    const char* preferred = std::getenv("BLOCK_TREE_DEVICE_HOST_COPY_PRIORITY");
+    if (preferred != nullptr && preferred[0] != '\0') {
+        constexpr std::array<std::string_view, 4> priorities = {"cuda_3d_batch", "cuda_batch", "sm", "generic"};
+        const auto selected = std::find(priorities.begin(), priorities.end(), std::string_view(preferred));
+        if (selected == priorities.end()) {
+            RTP_LLM_LOG_WARNING("invalid BLOCK_TREE_DEVICE_HOST_COPY_PRIORITY='%s'; keeping default copy order",
+                                preferred);
+        } else {
+            const auto strategy = strategies_.begin() + (selected - priorities.begin());
+            std::rotate(strategies_.begin(), strategy, strategy + 1);
+        }
+    }
 }
 
 TransferStatus DeviceHostTransferExecutor::executeBatch(const std::vector<HostBufferView>&     hosts,
