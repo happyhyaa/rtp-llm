@@ -67,6 +67,11 @@ public:
             completed_->fetch_add(1, std::memory_order_relaxed);
             stats_->lowest_api_ns.fetch_add(elapsed, std::memory_order_relaxed);
             stats_->lowest_api_calls.fetch_add(1, std::memory_order_relaxed);
+            if (completed_ == &stats_->cuda_3d_batch) {
+                stats_->cuda_3d_input_tiles.fetch_add(plan.copy_tiles.size(), std::memory_order_relaxed);
+                stats_->cuda_3d_copy_operations.fetch_add(result.copy_operation_count,
+                                                          std::memory_order_relaxed);
+            }
         }
         return result;
     }
@@ -80,11 +85,13 @@ private:
 void installStrategyRecorders(PerRankBlockTransferEngine&                          engine,
                               const std::shared_ptr<BenchmarkDeviceHostCopyStats>& stats) {
     auto& strategies = engine.device_host_executor_->strategies_;
-    RTP_LLM_CHECK(strategies.size() == 3);
+    RTP_LLM_CHECK(strategies.size() == 4);
     for (auto& strategy : strategies) {
         std::atomic<size_t>* completed = nullptr;
         if (dynamic_cast<StagedSmDeviceHostCopyStrategy*>(strategy.get()) != nullptr) {
             completed = &stats->staged_sm;
+        } else if (dynamic_cast<Cuda3DBatchDeviceHostCopyStrategy*>(strategy.get()) != nullptr) {
+            completed = &stats->cuda_3d_batch;
         } else if (dynamic_cast<CudaBatchDeviceHostCopyStrategy*>(strategy.get()) != nullptr) {
             completed = &stats->cuda_batch;
         } else if (dynamic_cast<GenericMultiCopyDeviceHostCopyStrategy*>(strategy.get()) != nullptr) {
@@ -352,11 +359,17 @@ TransferBenchmarkRunner::buildTransferSetup(const GroupSetInfo&            gs_in
     setup.copy_stats                    = std::make_shared<BenchmarkDeviceHostCopyStats>();
     DeviceHostCopyOptions copy_options;
     if (options_.copy_strategy == "staged-sm") {
+        copy_options.cuda_3d_batch_copy_enabled = false;
         copy_options.staged_sm_copy_enabled   = true;
         copy_options.staged_sm_min_tile_count = 0;
         copy_options.staged_sm_min_bytes      = 0;
         copy_options.cuda_batch_copy_enabled  = false;
+    } else if (options_.copy_strategy == "3d-batch") {
+        copy_options.cuda_3d_batch_copy_enabled = true;
+        copy_options.cuda_batch_copy_enabled = false;
+        copy_options.staged_sm_copy_enabled = false;
     } else if (options_.copy_strategy == "batch") {
+        copy_options.cuda_3d_batch_copy_enabled = false;
         copy_options.staged_sm_copy_enabled  = false;
         copy_options.cuda_batch_copy_enabled = true;
     }
@@ -669,6 +682,8 @@ bool TransferBenchmarkRunner::runPurePathTransfer() {
     const bool   wrapped = ((final_operations + direction_count - 1) / direction_count) > working_set_blocks;
 
     std::vector<std::string> actual_strategies;
+    if (setup.copy_stats->cuda_3d_batch.load(std::memory_order_relaxed) > 0)
+        actual_strategies.push_back("3d-batch");
     if (setup.copy_stats->staged_sm.load(std::memory_order_relaxed) > 0)
         actual_strategies.push_back("staged-sm");
     if (setup.copy_stats->cuda_batch.load(std::memory_order_relaxed) > 0)
@@ -679,6 +694,10 @@ bool TransferBenchmarkRunner::runPurePathTransfer() {
                                         actual_strategies.size() == 1 ? actual_strategies.front() :
                                                                         "mixed";
     writer_.addResolvedConfig("actual_copy_strategy", actual_strategy);
+    writer_.addMetric("cuda_3d_input_tiles",
+                      static_cast<double>(setup.copy_stats->cuda_3d_input_tiles.load(std::memory_order_relaxed)));
+    writer_.addMetric("cuda_3d_copy_operations",
+                      static_cast<double>(setup.copy_stats->cuda_3d_copy_operations.load(std::memory_order_relaxed)));
 
     writer_.setWorkload(seed_, final_operations, attempted, succeeded, failed);
     writer_.setTransferWorkload(

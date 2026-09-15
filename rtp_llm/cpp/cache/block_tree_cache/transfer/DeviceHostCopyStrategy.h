@@ -23,6 +23,10 @@ struct DeviceHostCopyTile {
     int    device_index{-1};
     size_t member_group_id{0};
     size_t local_layer_index{0};
+    // Missing identity is deliberately non-coalescible for externally built plans.
+    size_t descriptor_index{SIZE_MAX};
+    size_t layout_index{SIZE_MAX};
+    size_t component_index{SIZE_MAX};
 };
 
 struct DeviceHostCopyPlan {
@@ -41,9 +45,10 @@ enum class StrategyStatus {
 struct StrategyResult {
     StrategyStatus status{StrategyStatus::NOT_APPLICABLE};
     TransferStatus copy_status{TransferStatus::OK};
+    size_t copy_operation_count{0};
 
-    static StrategyResult done() {
-        return {StrategyStatus::DONE, TransferStatus::OK};
+    static StrategyResult done(size_t operations = 0) {
+        return {StrategyStatus::DONE, TransferStatus::OK, operations};
     }
     static StrategyResult notApplicable() {
         return {StrategyStatus::NOT_APPLICABLE, TransferStatus::OK};
@@ -68,6 +73,11 @@ public:
 private:
     std::mutex                                              scratch_mutex_;
     std::map<int, std::unique_ptr<StagedMemoryCopyScratch>> scratch_by_device_;
+};
+
+class Cuda3DBatchDeviceHostCopyStrategy: public DeviceHostCopyStrategy {
+public:
+    StrategyResult tryExecute(const DeviceHostCopyPlan& plan, const DeviceHostCopyOptions& options) override;
 };
 
 class CudaBatchDeviceHostCopyStrategy: public DeviceHostCopyStrategy {

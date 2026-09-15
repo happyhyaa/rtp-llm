@@ -3,9 +3,11 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 
 #include <torch/torch.h>
 
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/DeviceHostCopyCoalescer.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/models_py/bindings/NoBlockCopy.h"
 
@@ -39,12 +41,12 @@ StrategyResult GenericMultiCopyDeviceHostCopyStrategy::tryExecute(const DeviceHo
     return StrategyResult::done();
 }
 
-StrategyResult CudaBatchDeviceHostCopyStrategy::tryExecute(const DeviceHostCopyPlan&    plan,
-                                                           const DeviceHostCopyOptions& options) {
-    if (!options.cuda_batch_copy_enabled) {
-        return StrategyResult::notApplicable();
+namespace {
+StrategyResult executeBatchCopy(const DeviceHostCopyPlan& plan,
+                                BatchedMemoryCopyStatus (*copy)(const BatchedMemoryCopyParams&)) {
+    if (plan.copy_tiles.empty()) {
+        return StrategyResult::done();
     }
-
     const int device_index = plan.copy_tiles.front().device_index;
     if (device_index < 0) {
         return StrategyResult::notApplicable();
@@ -55,6 +57,12 @@ StrategyResult CudaBatchDeviceHostCopyStrategy::tryExecute(const DeviceHostCopyP
     params.tiles.reserve(plan.copy_tiles.size());
 
     for (const auto& tile : plan.copy_tiles) {
+        if (tile.bytes == 0) {
+            continue;
+        }
+        if (tile.device_index != device_index || tile.host_addr == nullptr || tile.device_addr == nullptr) {
+            return StrategyResult::failed(TransferStatus::INVALID_ARGS);
+        }
         BatchedMemoryCopyTile batch_tile;
         if (plan.device_to_host) {
             batch_tile.dst = tile.host_addr;
@@ -67,14 +75,68 @@ StrategyResult CudaBatchDeviceHostCopyStrategy::tryExecute(const DeviceHostCopyP
         params.tiles.push_back(batch_tile);
     }
 
-    const auto status = execBatchedMemoryCopy(params);
+    const auto status = copy(params);
     if (status == BatchedMemoryCopyStatus::NOT_SUPPORTED) {
         return StrategyResult::notApplicable();
     }
     if (status == BatchedMemoryCopyStatus::EXECUTION_FAILED) {
         return StrategyResult::failed(TransferStatus::DEVICE_IO_ERROR);
     }
-    return StrategyResult::done();
+    return StrategyResult::done(params.tiles.size());
+}
+
+}  // namespace
+
+StrategyResult Cuda3DBatchDeviceHostCopyStrategy::tryExecute(const DeviceHostCopyPlan& plan,
+                                                            const DeviceHostCopyOptions& options) {
+    if (!options.cuda_3d_batch_copy_enabled) {
+        return StrategyResult::notApplicable();
+    }
+    if (plan.copy_tiles.empty()) {
+        return StrategyResult::done();
+    }
+    const int device_index = plan.copy_tiles.front().device_index;
+    if (device_index < 0) {
+        return StrategyResult::notApplicable();
+    }
+    Batched3DMemoryCopyParams params;
+    params.device_index = device_index;
+    try {
+        std::vector<CopyCoalescingTile> tiles;
+        tiles.reserve(plan.copy_tiles.size());
+        for (const auto& tile : plan.copy_tiles) {
+            if (tile.bytes == 0) {
+                continue;
+            }
+            if (tile.device_index != device_index) {
+                return StrategyResult::failed(TransferStatus::INVALID_ARGS);
+            }
+            tiles.push_back({plan.device_to_host ? tile.device_addr : tile.host_addr,
+                             plan.device_to_host ? tile.host_addr : tile.device_addr,
+                             tile.bytes, tile.descriptor_index, tile.layout_index,
+                             tile.member_group_id, tile.component_index,
+                             tile.local_layer_index, tile.device_index});
+        }
+        for (const auto& region : coalesceDeviceHostTiles(tiles)) {
+            params.regions.push_back({region.src, region.dst, region.width, region.height,
+                                      region.src_pitch, region.dst_pitch});
+        }
+    } catch (const std::exception& error) {
+        RTP_LLM_LOG_WARNING("invalid 3D batch copy plan: %s", error.what());
+        return StrategyResult::failed(TransferStatus::INVALID_ARGS);
+    }
+    const auto status = execBatched3DMemoryCopy(params);
+    if (status == BatchedMemoryCopyStatus::NOT_SUPPORTED) {
+        return StrategyResult::notApplicable();
+    }
+    return status == BatchedMemoryCopyStatus::SUCCESS ? StrategyResult::done(params.regions.size()) :
+           StrategyResult::failed(TransferStatus::DEVICE_IO_ERROR);
+}
+
+StrategyResult CudaBatchDeviceHostCopyStrategy::tryExecute(const DeviceHostCopyPlan& plan,
+                                                          const DeviceHostCopyOptions& options) {
+    return options.cuda_batch_copy_enabled ? executeBatchCopy(plan, execBatchedMemoryCopy) :
+                                            StrategyResult::notApplicable();
 }
 
 static constexpr size_t kStagedAlignment = 16;

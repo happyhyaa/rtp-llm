@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <torch/torch.h>
 #include <vector>
+#include "rtp_llm/models_py/bindings/MemoryCopyRegion.h"
 
 namespace rtp_llm {
 
@@ -83,6 +84,10 @@ void execNoBlockCopy(const MultiCopyParams& params);
 // Only NOT_SUPPORTED permits the caller to fall back to another strategy;
 // EXECUTION_FAILED means a CUDA call was attempted and failed.
 BatchedMemoryCopyStatus execBatchedMemoryCopy(const BatchedMemoryCopyParams& params);
+
+// One independent width/height/pitch operation per region, depth=1.
+// Caller guarantees same-device, independent operations; completion is synchronous.
+BatchedMemoryCopyStatus execBatched3DMemoryCopy(const Batched3DMemoryCopyParams& params);
 
 // Stages compact host payload in GPU memory, then uses one SM gather/scatter kernel.
 // host_segments may describe non-contiguous host blocks; they are packed/unpacked on CPU.

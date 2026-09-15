@@ -2,13 +2,16 @@
 
 ## Device/Host copy API priority
 
-默认顺序为 `cuda_batch > sm > generic`。
+默认顺序为 `cuda_3d_batch > cuda_batch > sm > generic`。3D 策略沿用现有子 batch，
+仅将同一 descriptor、device、layout、member 和 component 中地址步长一致的相邻 layer tile
+合并成一个 width/height/pitch region，再由一次 `cudaMemcpy3DBatchAsync` 提交全部 region。
+不存在逐 tile 的 3D 执行分支。
 
 `BLOCK_TREE_DEVICE_HOST_COPY_PRIORITY` 可设置为 `cuda_batch`、`sm` 或 `generic`。
 只把指定接口移到首位，其他接口保持相对顺序。例如：
 
 ```bash
-export BLOCK_TREE_DEVICE_HOST_COPY_PRIORITY=sm  # sm > cuda_batch > generic
+export BLOCK_TREE_DEVICE_HOST_COPY_PRIORITY=sm  # sm > cuda_3d_batch > cuda_batch > generic
 ```
 
 仅在 executor 构造时读取；未设置/空值使用默认顺序，非法值告警后使用默认顺序。

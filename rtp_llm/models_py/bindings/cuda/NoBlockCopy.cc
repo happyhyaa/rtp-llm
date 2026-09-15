@@ -396,6 +396,146 @@ BatchedMemoryCopyStatus execBatchedMemoryCopy(const BatchedMemoryCopyParams& par
 #endif
 }
 
+static bool validCopyRegion(const MemoryCopyRegion& region) {
+    if (region.width == 0) {
+        return true;
+    }
+    if (region.src == nullptr || region.dst == nullptr || region.height == 0
+        || region.src_pitch < region.width || region.dst_pitch < region.width) {
+        return false;
+    }
+    const auto fits = [&](const void* ptr, size_t pitch) {
+        const uintptr_t address = reinterpret_cast<uintptr_t>(ptr);
+        return region.width <= UINTPTR_MAX - address
+               && region.height - 1 <= (UINTPTR_MAX - address - region.width) / pitch;
+    };
+    return fits(region.src, region.src_pitch) && fits(region.dst, region.dst_pitch);
+}
+
+BatchedMemoryCopyStatus execBatched3DMemoryCopy(const Batched3DMemoryCopyParams& params) {
+    if (!std::all_of(params.regions.begin(), params.regions.end(), validCopyRegion)) {
+        RTP_LLM_LOG_WARNING("execBatched3DMemoryCopy failed: invalid copy region");
+        return BatchedMemoryCopyStatus::EXECUTION_FAILED;
+    }
+    if (params.regions.empty()) {
+        return BatchedMemoryCopyStatus::SUCCESS;
+    }
+    if (params.device_index < 0) {
+        RTP_LLM_LOG_WARNING("execBatched3DMemoryCopy failed: invalid device_index=%d", params.device_index);
+        return BatchedMemoryCopyStatus::EXECUTION_FAILED;
+    }
+
+#if CUDART_VERSION >= 12080
+    constexpr int min_batch_driver_version = CUDART_VERSION >= 13000 ? 13000 : 12080;
+    const int     driver_version           = getCudaVersion();
+    if (driver_version < min_batch_driver_version) {
+        static std::once_flag driver_warning_once;
+        std::call_once(driver_warning_once, [driver_version, min_batch_driver_version] {
+            RTP_LLM_LOG_WARNING(
+                "execBatched3DMemoryCopy unavailable: compile-time CUDART_VERSION=%d requires driver API version "
+                ">=%d for its cudaMemcpy3DBatchAsync ABI, installed driver API version=%d; falling back",
+                CUDART_VERSION,
+                min_batch_driver_version,
+                driver_version);
+        });
+        return BatchedMemoryCopyStatus::NOT_SUPPORTED;
+    }
+
+    int        runtime_version       = 0;
+    const auto runtime_version_error = cudaRuntimeGetVersion(&runtime_version);
+    if (runtime_version_error != cudaSuccess) {
+        RTP_LLM_LOG_WARNING("execBatched3DMemoryCopy unavailable: compile-time CUDART_VERSION=%d, failed to query "
+                            "runtime version (%s); cannot prove cudaMemcpy3DBatchAsync ABI compatibility",
+                            CUDART_VERSION,
+                            cudaGetErrorString(runtime_version_error));
+        return BatchedMemoryCopyStatus::NOT_SUPPORTED;
+    }
+    if (runtime_version < 12080) {
+        RTP_LLM_LOG_WARNING("execBatched3DMemoryCopy unavailable: runtime version=%d predates "
+                            "cudaMemcpy3DBatchAsync; falling back",
+                            runtime_version);
+        return BatchedMemoryCopyStatus::NOT_SUPPORTED;
+    }
+    const bool compiled_with_cuda13_batch_abi = CUDART_VERSION >= 13000;
+    const bool runtime_uses_cuda13_batch_abi  = runtime_version >= 13000;
+    if (compiled_with_cuda13_batch_abi != runtime_uses_cuda13_batch_abi) {
+        RTP_LLM_LOG_WARNING("execBatched3DMemoryCopy unavailable: compile-time CUDART_VERSION=%d and runtime "
+                            "version=%d use incompatible signatures; falling back",
+                            CUDART_VERSION,
+                            runtime_version);
+        return BatchedMemoryCopyStatus::NOT_SUPPORTED;
+    }
+
+    check_cuda_value(cudaSetDevice(params.device_index));
+    auto stream = getNoBlockCopyStream().stream();
+
+    std::vector<cudaMemcpy3DBatchOp> ops;
+    ops.reserve(params.regions.size());
+    for (const auto& region : params.regions) {
+        if (region.width == 0) {
+            continue;
+        }
+        cudaMemcpy3DBatchOp op{};
+        op.src.type               = cudaMemcpyOperandTypePointer;
+        op.src.op.ptr.ptr         = const_cast<void*>(region.src);
+        op.src.op.ptr.rowLength   = region.src_pitch;
+        op.src.op.ptr.layerHeight = region.height;
+        op.dst.type               = cudaMemcpyOperandTypePointer;
+        op.dst.op.ptr.ptr         = region.dst;
+        op.dst.op.ptr.rowLength   = region.dst_pitch;
+        op.dst.op.ptr.layerHeight = region.height;
+        op.extent                 = {region.width, region.height, 1};
+        op.srcAccessOrder         = cudaMemcpySrcAccessOrderStream;
+        ops.push_back(op);
+    }
+    if (ops.empty()) {
+        return BatchedMemoryCopyStatus::SUCCESS;
+    }
+
+    RTP_LLM_LOG_DEBUG("execBatched3DMemoryCopy phase=submit device=%d stream=%p regions=%zu",
+                      params.device_index,
+                      static_cast<void*>(stream),
+                      ops.size());
+    std::unique_lock<std::mutex> submit_lock(cudaBatchSubmitMutex(params.device_index));
+#if CUDART_VERSION >= 13000
+    const auto submit_error = cudaMemcpy3DBatchAsync(ops.size(), ops.data(), 0, stream);
+#else
+    size_t     fail_idx     = 0;
+    const auto submit_error = cudaMemcpy3DBatchAsync(ops.size(), ops.data(), &fail_idx, 0, stream);
+#endif
+    submit_lock.unlock();
+    if (submit_error != cudaSuccess) {
+        RTP_LLM_LOG_WARNING("execBatched3DMemoryCopy failed phase=submit device=%d stream=%p regions=%zu "
+                            "error_code=%d error=%s",
+                            params.device_index,
+                            static_cast<void*>(stream),
+                            ops.size(),
+                            static_cast<int>(submit_error),
+                            cudaGetErrorString(submit_error));
+        return BatchedMemoryCopyStatus::EXECUTION_FAILED;
+    }
+
+    const auto completion_error = cudaStreamSynchronize(stream);
+    if (completion_error != cudaSuccess) {
+        RTP_LLM_LOG_WARNING("execBatched3DMemoryCopy failed phase=completion device=%d stream=%p regions=%zu "
+                            "error_code=%d error=%s",
+                            params.device_index,
+                            static_cast<void*>(stream),
+                            ops.size(),
+                            static_cast<int>(completion_error),
+                            cudaGetErrorString(completion_error));
+        return BatchedMemoryCopyStatus::EXECUTION_FAILED;
+    }
+    if (Logger::getEngineLogger().isDebugMode()) {
+        check_cuda_value(cudaGetLastError());
+    }
+    return BatchedMemoryCopyStatus::SUCCESS;
+#else
+    RTP_LLM_LOG_DEBUG("execBatched3DMemoryCopy unavailable: CUDART_VERSION=%d", CUDART_VERSION);
+    return BatchedMemoryCopyStatus::NOT_SUPPORTED;
+#endif
+}
+
 bool execStagedMemoryCopy(const StagedMemoryCopyParams& params, StagedMemoryCopyScratch* scratch) {
     if (params.tiles.empty()) {
         return true;
