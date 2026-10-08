@@ -303,7 +303,9 @@ private:
 static std::string copyStrategyOrder(const DeviceHostTransferExecutor& executor) {
     std::string result;
     for (const auto& strategy : executor.strategies_) {
-        if (dynamic_cast<CudaBatchDeviceHostCopyStrategy*>(strategy.get())) {
+        if (dynamic_cast<Cuda3DBatchDeviceHostCopyStrategy*>(strategy.get())) {
+            result += 'T';
+        } else if (dynamic_cast<CudaBatchDeviceHostCopyStrategy*>(strategy.get())) {
             result += 'B';
         } else if (dynamic_cast<StagedSmDeviceHostCopyStrategy*>(strategy.get())) {
             result += 'S';
@@ -315,29 +317,49 @@ static std::string copyStrategyOrder(const DeviceHostTransferExecutor& executor)
 }
 
 static void installStrategyRecorders(DeviceHostTransferExecutor& executor, std::array<StrategyCounters, 3>& counters) {
+    // These existing tests exercise only the unchanged legacy strategy chain.
+    executor.strategies_.erase(
+        std::remove_if(executor.strategies_.begin(),
+                       executor.strategies_.end(),
+                       [](const auto& strategy) {
+                           return dynamic_cast<Cuda3DBatchDeviceHostCopyStrategy*>(strategy.get()) != nullptr;
+                       }),
+        executor.strategies_.end());
     RTP_LLM_CHECK(executor.strategies_.size() == counters.size());
     for (size_t i = 0; i < counters.size(); ++i) {
         executor.strategies_[i] = std::make_unique<RecordingStrategy>(std::move(executor.strategies_[i]), &counters[i]);
     }
 }
 
-TEST(DeviceHostTransferExecutorConfigTest, PrefersCudaBatchThenStagedSmThenGeneric) {
+TEST(DeviceHostTransferExecutorConfigTest, IncludesTemplateStrategyBeforeLegacyFallbacks) {
+    ScopedCopyPriorityEnv      priority(nullptr);
+    BlockTreeTaskPool          task_pool(1, 8, "TemplateStrategyConfigTest");
+    DeviceHostTransferExecutor executor(task_pool, 8);
+    EXPECT_EQ(executor.strategies_.size(), 4u);
+}
+
+TEST(DeviceHostTransferExecutorConfigTest, PrefersCuda3DBatchThenCudaBatchThenStagedSmThenGeneric) {
     ScopedCopyPriorityEnv priority(nullptr);
     BlockTreeTaskPool          task_pool(1, 8, "DeviceHostExecutorConfigTest");
     DeviceHostTransferExecutor executor(task_pool, 8);
     EXPECT_TRUE(executor.options_.cuda_batch_copy_enabled);
     EXPECT_TRUE(executor.options_.staged_sm_copy_enabled);
-    ASSERT_EQ(executor.strategies_.size(), 3u);
-    EXPECT_NE(dynamic_cast<CudaBatchDeviceHostCopyStrategy*>(executor.strategies_[0].get()), nullptr);
-    EXPECT_NE(dynamic_cast<StagedSmDeviceHostCopyStrategy*>(executor.strategies_[1].get()), nullptr);
-    EXPECT_NE(dynamic_cast<GenericMultiCopyDeviceHostCopyStrategy*>(executor.strategies_[2].get()), nullptr);
+    ASSERT_EQ(executor.strategies_.size(), 4u);
+    EXPECT_NE(dynamic_cast<Cuda3DBatchDeviceHostCopyStrategy*>(executor.strategies_[0].get()), nullptr);
+    EXPECT_NE(dynamic_cast<CudaBatchDeviceHostCopyStrategy*>(executor.strategies_[1].get()), nullptr);
+    EXPECT_NE(dynamic_cast<StagedSmDeviceHostCopyStrategy*>(executor.strategies_[2].get()), nullptr);
+    EXPECT_NE(dynamic_cast<GenericMultiCopyDeviceHostCopyStrategy*>(executor.strategies_[3].get()), nullptr);
 }
 
 TEST(DeviceHostTransferExecutorConfigTest, PromotesOnlyExistingSelectedStrategyAtInitialization) {
-    const std::pair<const char*, const char*> cases[] = {
-        {nullptr, "BSG"},       {"", "BSG"},           {"cuda_batch", "BSG"},
-        {"sm", "SBG"},         {"generic", "GBS"},    {"cuda_3d_batch", "BSG"},
-        {"unknown", "BSG"},    {"SM", "BSG"}};
+    const std::pair<const char*, const char*> cases[] = {{nullptr, "TBSG"},
+                                                         {"", "TBSG"},
+                                                         {"cuda_batch", "BTSG"},
+                                                         {"sm", "STBG"},
+                                                         {"generic", "GTBS"},
+                                                         {"cuda_3d_batch", "TBSG"},
+                                                         {"unknown", "TBSG"},
+                                                         {"SM", "TBSG"}};
     BlockTreeTaskPool task_pool(1, 8, "CopyPriorityTest");
     for (const auto& [value, expected] : cases) {
         SCOPED_TRACE(value != nullptr ? value : "<unset>");
@@ -350,7 +372,7 @@ TEST(DeviceHostTransferExecutorConfigTest, PromotesOnlyExistingSelectedStrategyA
         ScopedCopyPriorityEnv::set("generic");
         EXPECT_EQ(copyStrategyOrder(executor), expected);
         DeviceHostTransferExecutor later(task_pool, 8, options);
-        EXPECT_EQ(copyStrategyOrder(later), "GBS");
+        EXPECT_EQ(copyStrategyOrder(later), "GTBS");
     }
 }
 
