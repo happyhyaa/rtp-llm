@@ -18,6 +18,12 @@ void validateTransferOptions(const TransferOptions& options) {
         || options.device_disk_staging_block_count == 0) {
         throw std::runtime_error("transfer count, concurrency and duration options must be positive");
     }
+    if (options.l2_eviction
+        && (options.business_concurrency == 0 || options.descriptors_per_business == 0
+            || options.transfer_directions.size() != 1
+            || (options.transfer_directions[0] != "h2d" && options.transfer_directions[0] != "d2h"))) {
+        throw std::runtime_error("--l2-eviction=8x requires single-direction H2D/D2H business mode");
+    }
     if (options.disk_io_mode != "direct" && options.disk_io_mode != "buffered")
         throw std::runtime_error("--disk-io-mode must be direct or buffered");
     if (options.disk_access_pattern != "sequential" && options.disk_access_pattern != "random")

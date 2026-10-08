@@ -15,6 +15,7 @@
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/benchmark/BenchmarkFixture.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/benchmark/BenchmarkL2Eviction.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/benchmark/TransferBenchmarkWorkload.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DiskBlockPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/HostBlockPool.h"
@@ -426,6 +427,16 @@ bool TransferBenchmarkRunner::runPurePathTransfer() {
         throw std::runtime_error("--copy-strategy is only valid for a transfer path that touches device memory");
     }
 
+    if (options_.l2_eviction
+        && (!business_mode || options_.transfer_directions.size() != 1
+            || (options_.transfer_directions[0] != "h2d" && options_.transfer_directions[0] != "d2h"))) {
+        throw std::runtime_error("L2 eviction requires single-direction H2D/D2H business mode");
+    }
+    BenchmarkL2Eviction l2_eviction(options_.l2_eviction);
+    writer_.addResolvedConfig("l2_eviction_mode", options_.l2_eviction ? "8x_before_business_measurement" : "off");
+    writer_.addResolvedConfigInt("l2_bytes", l2_eviction.l2Bytes());
+    writer_.addResolvedConfigInt("l2_eviction_bytes", l2_eviction.evictionBytes());
+
     const size_t payload_bytes = group_set_info->payload_bytes;
     const size_t concurrency   = business_mode ? options_.business_concurrency * options_.descriptors_per_business :
                                                  options_.transfer_concurrency;
@@ -628,6 +639,13 @@ bool TransferBenchmarkRunner::runPurePathTransfer() {
     setup.copy_stats->reset();
     std::cout << "PROFILE_ATTACH_READY" << std::endl;
     std::this_thread::sleep_for(std::chrono::seconds(2));
+    // Warmup has completed; eviction and its synchronization are outside all
+    // business/whole-round timing. No per-descriptor or per-worker barriers.
+    if (options_.l2_eviction) {
+        const auto eviction_start = Clock::now();
+        l2_eviction.evict();
+        writer_.addPhaseNs("l2_eviction", elapsedNs(eviction_start, Clock::now()));
+    }
     std::cout << "MEASURE_START" << std::endl;
     const auto start            = Clock::now();
     auto       measured         = run_batch(initial_measured_operations, coordinate_cursor);

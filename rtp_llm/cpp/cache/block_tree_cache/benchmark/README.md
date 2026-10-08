@@ -1,5 +1,28 @@
 # BlockTreeCache Benchmark
 
+## Flash 128/128 and optional L2 eviction
+
+Use `profiles/deepseek_v4_flash_fp8_tp1_cp1_tpb128.json` for DSV4-Flash
+FP8 TP1/CP1 with 128 logical tokens/block and 128 kernel tokens/block.
+The existing 1024/128 profile is unchanged. C/W/B and descriptor counts
+retain their original meanings; payload bytes per descriptor change.
+
+Full physical strides are CSA=19008, HCA=1152, indexer=4224 bytes, with
+21/20/21 layers: 510912 bytes per Full descriptor. These follow the FP8
+physical stride rules in CacheConfigCreator and DSV4CacheTest, including
+padding (not just logical token size). SWA state/window sizes do not scale
+with the logical block: its payload remains 4940160 bytes.
+
+`--l2-eviction=8x` is opt-in (default `off`), for single-direction H2D/D2H
+business mode only. Allocate a separate 8x GPU L2 scratch buffer once.
+After native warmup and before MEASURE_START, synchronize prior GPU work,
+read/write the scratch buffer, then wait for the sweep to finish.
+This cost is recorded as phase `l2_eviction`, outside business/whole-round RT.
+There are no per-descriptor or per-sub-batch flushes; submit_all_then_wait
+and worker concurrency remain unchanged. This is best-effort eviction,
+not a guarantee of 100% L2 misses. JSON records `l2_eviction_mode`,
+`l2_bytes`, and `l2_eviction_bytes`; Host/Disk caches are not cleared.
+
 ## Device/Host copy API priority
 
 默认顺序为 `cuda_batch > sm > generic`。

@@ -73,5 +73,57 @@ TEST(BenchmarkCliTest, DispatchesMixedCommonAndTreeOptions) {
     EXPECT_TRUE(result.ran);
     EXPECT_TRUE(result.error.empty());
 }
+TEST(BenchmarkCliTest, AcceptsL2EvictionForDeviceHostBusinessMeasurements) {
+    const char* runfiles  = std::getenv("TEST_SRCDIR");
+    const char* workspace = std::getenv("TEST_WORKSPACE");
+    ASSERT_NE(runfiles, nullptr);
+    ASSERT_NE(workspace, nullptr);
+    const std::string path =
+        std::string(runfiles) + "/" + workspace
+        + "/rtp_llm/cpp/cache/block_tree_cache/benchmark/profiles/deepseek_v4_pro_fp8_tp1_cp1.json";
+    for (const auto* direction : {"h2d", "d2h"}) {
+        const auto result = invoke({"transfer",
+                                    "--model-profile=" + path,
+                                    "--business-concurrency=1",
+                                    "--descriptors-per-business=1",
+                                    std::string("--transfer-directions=") + direction,
+                                    "--l2-eviction=8x"});
+        EXPECT_EQ(result.code, 0) << result.error;
+        EXPECT_TRUE(result.ran);
+    }
+}
+
+TEST(BenchmarkCliTest, RejectsInvalidL2EvictionBeforeRunningGpuCode) {
+    for (const auto* mode : {"1x", "-8", "typo"}) {
+        const auto result = invoke({"transfer", std::string("--l2-eviction=") + mode});
+        EXPECT_EQ(result.code, 1);
+        EXPECT_FALSE(result.ran);
+    }
+}
+
+TEST(BenchmarkCliTest, RejectsEvictionOutsideSingleDirectionBusinessMode) {
+    const char* runfiles  = std::getenv("TEST_SRCDIR");
+    const char* workspace = std::getenv("TEST_WORKSPACE");
+    ASSERT_NE(runfiles, nullptr);
+    ASSERT_NE(workspace, nullptr);
+    const std::string path =
+        std::string(runfiles) + "/" + workspace
+        + "/rtp_llm/cpp/cache/block_tree_cache/benchmark/profiles/deepseek_v4_pro_fp8_tp1_cp1.json";
+    for (const auto& extra : std::vector<std::vector<std::string>>{
+             {},
+             {"--business-concurrency=1"},
+             {"--business-concurrency=1", "--descriptors-per-business=1", "--transfer-directions=h2disk"},
+             {"--business-concurrency=1", "--descriptors-per-business=1", "--transfer-directions=h2d,d2h"}}) {
+        std::vector<std::string> args{"transfer", "--model-profile=" + path, "--l2-eviction=8x"};
+        args.insert(args.end(), extra.begin(), extra.end());
+        const auto result = invoke(args);
+        EXPECT_EQ(result.code, 1);
+        EXPECT_FALSE(result.ran);
+    }
+    const auto disabled = invoke({"transfer", "--model-profile=" + path, "--l2-eviction=off"});
+    EXPECT_EQ(disabled.code, 0) << disabled.error;
+    EXPECT_TRUE(disabled.ran);
+}
+
 }  // namespace
 }  // namespace rtp_llm::benchmark

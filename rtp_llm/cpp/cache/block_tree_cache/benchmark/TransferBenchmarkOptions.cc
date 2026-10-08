@@ -40,7 +40,12 @@ TransferOptions TransferOptions::parse(int& argc, char**& argv) {
             opts.copy_strategy = next();
         else if (key == "min-measured-seconds")
             opts.min_measured_seconds = parseUnsigned(key, next);
-        else if (key == "disk-path")
+        else if (key == "l2-eviction") {
+            const std::string mode = next();
+            if (mode != "off" && mode != "8x")
+                throw std::runtime_error("--l2-eviction must be off or 8x");
+            opts.l2_eviction = mode == "8x";
+        } else if (key == "disk-path")
             opts.disk_path = next();
         else if (key == "disk-io-mode")
             opts.disk_io_mode = next();
@@ -71,6 +76,7 @@ void TransferOptions::printHelp() {
         << "  --transfer-descriptor-batch-size=N  Descriptors per engine submit (0 = concurrency)\n"
         << "  --copy-strategy=STRATEGY     auto | batch | staged-sm (default: auto)\n"
         << "  --min-measured-seconds=N     Measured phase duration floor; pilot run scales op count (default: 30)\n"
+        << "  --l2-eviction=MODE           off | 8x; before whole H2D/D2H business measurement (default: off)\n"
         << "  --disk-path=PATH             Disk directory for disk transfers\n"
         << "  --disk-io-mode=MODE          direct | buffered (default: direct)\n"
         << "  --disk-access-pattern=PAT    sequential | random (default: sequential)\n"

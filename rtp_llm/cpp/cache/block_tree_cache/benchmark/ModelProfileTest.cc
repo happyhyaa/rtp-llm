@@ -82,5 +82,31 @@ TEST(ModelProfileTest, LoadsShippedProfilesWithConsistentPayloads) {
         }
     }
 }
+TEST(ModelProfileTest, Flash128UsesCompressedFullButPreservesSwaWindowAndState) {
+    const char* runfiles  = std::getenv("TEST_SRCDIR");
+    const char* workspace = std::getenv("TEST_WORKSPACE");
+    ASSERT_NE(runfiles, nullptr);
+    ASSERT_NE(workspace, nullptr);
+    const auto profile = ModelProfile::load(
+        std::string(runfiles) + "/" + workspace
+        + "/rtp_llm/cpp/cache/block_tree_cache/benchmark/profiles/deepseek_v4_flash_fp8_tp1_cp1_tpb128.json");
+    EXPECT_EQ(profile.tokens_per_block, 128u);
+    // Physical FP8 strides from CacheConfigCreator/DSV4CacheTest.
+    const std::pair<const char*, size_t> strides[] = {{"csa_kv", 19008},
+                                                      {"hca_kv", 1152},
+                                                      {"indexer_kv", 4224},
+                                                      {"csa_state", 65536},
+                                                      {"indexer_state", 16384},
+                                                      {"swa_kv", 74880}};
+    for (const auto& [tag, stride] : strides) {
+        ASSERT_NE(profile.findGroup(tag), nullptr);
+        EXPECT_EQ(profile.findGroup(tag)->layer_stride_bytes, stride);
+    }
+    EXPECT_EQ(profile.computeGroupSetPayloadBytes("full_context"), 510912u);
+    EXPECT_EQ(profile.computeGroupSetPayloadBytes("swa"), 4940160u);
+    ASSERT_NE(profile.findGroupSet("swa"), nullptr);
+    EXPECT_EQ(profile.findGroupSet("swa")->sliding_window_size, 128u);
+}
+
 }  // namespace
 }  // namespace rtp_llm::benchmark

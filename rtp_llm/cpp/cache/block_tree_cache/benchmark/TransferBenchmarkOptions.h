@@ -39,6 +39,9 @@ struct TransferOptions {
     // operation count so the measured phase lasts at least this long.
     size_t min_measured_seconds{30};
 
+    // Benchmark-only: evict 8x GPU L2 before the complete business measurement.
+    bool l2_eviction{false};
+
     // Disk configuration
     std::string disk_path;
     std::string disk_io_mode{"direct"};             // "direct" or "buffered"

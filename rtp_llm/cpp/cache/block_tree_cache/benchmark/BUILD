@@ -1,4 +1,18 @@
-load("//:def.bzl", "copts")
+load("//:def.bzl", "any_cuda_copts", "copts")
+
+cc_test(
+    name = "benchmark_l2_eviction_test",
+    target_compatible_with = select({"@//:using_cuda": [], "//conditions:default": ["@platforms//:incompatible"]}),
+    srcs = ["BenchmarkL2EvictionTest.cc"],
+    copts = copts(),
+    tags = ["gpu", "local", "exclusive", "manual"],
+    deps = [
+        ":benchmark_l2_eviction",
+        "@com_google_googletest//:gtest_main",
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ],
+)
 
 CUDA_ONLY = select({
     "@//:using_cuda": [],
@@ -116,6 +130,18 @@ cc_library(
 )
 
 cc_library(
+    name = "benchmark_l2_eviction",
+    target_compatible_with = CUDA_ONLY,
+    srcs = ["BenchmarkL2Eviction.cu"],
+    hdrs = ["BenchmarkL2Eviction.h"],
+    copts = any_cuda_copts(),
+    deps = [
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ],
+)
+
+cc_library(
     name = "transfer_benchmark_runner",
     target_compatible_with = CUDA_ONLY,
     srcs = [
@@ -130,6 +156,7 @@ cc_library(
         ":benchmark_common",
         ":benchmark_fixture",
         ":transfer_benchmark_workload",
+        ":benchmark_l2_eviction",
         "//rtp_llm/cpp/cache/block_tree_cache",
         "//rtp_llm/cpp/cache/block_tree_cache:device_block_pool",
         "//rtp_llm/cpp/cache:cache_types",
@@ -287,6 +314,7 @@ cc_test(
     srcs = ["ModelProfileTest.cc"],
     copts = copts(),
     data = [
+        "//rtp_llm/cpp/cache/block_tree_cache/benchmark/profiles:deepseek_v4_flash_fp8_tp1_cp1_tpb128",
         "//rtp_llm/cpp/cache/block_tree_cache/benchmark/profiles:deepseek_v4_pro_fp8_tp1_cp1",
         "//rtp_llm/cpp/cache/block_tree_cache/benchmark/profiles:deepseek_v4_flash_fp8_tp1_cp1_tpb1024",
     ],
