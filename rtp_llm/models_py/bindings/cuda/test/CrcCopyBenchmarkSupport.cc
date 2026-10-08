@@ -2,6 +2,8 @@
 
 #include "rtp_llm/models_py/bindings/NoBlockCopy.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/DeviceHostCopyStrategy.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/group_set/FullGroupSet.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/group_set/SWAGroupSet.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/cache/DeviceBlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
@@ -228,6 +230,124 @@ void FrameworkCopies::copyStaged(const FrameworkCopyPlan& plan, bool store) {
                                                                         store ? DeviceHostCopyDirection::D2H :
                                                                                 DeviceHostCopyDirection::H2D}),
                 "rebased production staged without CRC");
+}
+
+struct Framework3DCopies::Impl {
+    struct Plan {
+        std::vector<HostBufferView>     hosts;
+        std::vector<TransferDescriptor> store, load;
+        std::vector<const GroupSet*>    groups;
+    };
+    GroupSetPtr                            group;
+    Cuda3DBatchDeviceHostCopyStrategy      strategy;
+    std::shared_ptr<DeviceHostCopyStreams> streams;
+    std::vector<Plan>                      plans;
+
+    Impl(const Layout& layout, size_t blocks, int device): streams(acquireDeviceHostCopyStreams(device)) {
+        const auto                      config = flashCacheConfig();
+        const auto                      type   = layout.name == "full" ? CacheGroupType::FULL : CacheGroupType::SWA;
+        std::vector<DeviceBlockPoolPtr> pools;
+        std::vector<size_t>             ids;
+        for (size_t gid = 0; gid < static_cast<size_t>(config.groupNums()); ++gid) {
+            const auto& g = config.topology().groupById(gid);
+            if (!g.policy.enable_prefix_reuse || g.policy.group_type != type)
+                continue;
+            auto pc =
+                std::make_shared<DeviceBlockPoolConfig>(DeviceBlockPoolConfigHelper::createConfigForGroup(config, gid));
+            if (pc->memory_layouts.size() != 1 || pc->memory_layouts.front().hasScale())
+                throw std::runtime_error("3D benchmark requires current Flash single-layout pools");
+            auto& m = pc->memory_layouts.front();
+            if (m.kv_cache_offset_bytes != 0 || m.kv_block_stride_bytes != g.kv_block_stride_bytes)
+                throw std::runtime_error("3D benchmark pool layout differs from CPU oracle");
+            pc->physical_block_count      = blocks;
+            m.block_num                   = blocks;
+            m.kv_block_pool_size_bytes    = blocks * m.layer_num * m.kv_block_stride_bytes;
+            m.total_size_bytes            = m.kv_block_pool_size_bytes;
+            pc->total_size_bytes          = m.total_size_bytes;
+            pc->use_device_malloc_backing = true;
+            pc->use_pinned_cpu_backing    = false;
+            auto pool                     = std::make_shared<DeviceBlockPool>(pc);
+            if (!pool->init())
+                throw std::runtime_error("3D benchmark pool initialization failed");
+            pools.push_back(pool);
+            ids.push_back(gid);
+        }
+        if (type == CacheGroupType::FULL)
+            group = std::make_shared<FullGroupSet>(pools, nullptr, nullptr);
+        else
+            group = std::make_shared<SWAGroupSet>(128, 128, pools, nullptr, nullptr);
+        group->initialize(0, config.topologyPtr(), ids);
+        if (group->payloadBytes() != layout.payload() || group->copy3DTemplates().size() != pools.size())
+            throw std::runtime_error("3D production templates do not cover benchmark layout");
+    }
+};
+
+Framework3DCopies::Framework3DCopies(const Layout& layout, size_t blocks, int device):
+    impl_(std::make_unique<Impl>(layout, blocks, device)) {}
+Framework3DCopies::~Framework3DCopies() = default;
+
+size_t Framework3DCopies::addPlan(const std::vector<BenchmarkCopyItem>& items, const std::vector<int>& blocks) {
+    if (items.size() != blocks.size())
+        throw std::runtime_error("3D plan size mismatch");
+    Impl::Plan plan;
+    for (size_t i = 0; i < items.size(); ++i) {
+        plan.hosts.push_back({items[i].host, items[i].payload_bytes, items[i].capacity_bytes});
+        std::vector<BlockIdxType> member_blocks(impl_->group->devicePools().size(), blocks[i]);
+        plan.store.push_back(TransferDescriptor::deviceToHost(0, member_blocks, i + 1));
+        plan.load.push_back(TransferDescriptor::hostToDevice(0, i + 1, member_blocks));
+        plan.groups.push_back(impl_->group.get());
+    }
+    impl_->plans.push_back(std::move(plan));
+    return impl_->plans.size() - 1;
+}
+
+uintptr_t Framework3DCopies::touchMetadata(size_t index) const {
+    const auto& p   = impl_->plans.at(index);
+    uintptr_t   sum = 0;
+    for (const auto& h : p.hosts)
+        sum += reinterpret_cast<uintptr_t>(h.base) ^ h.payload_bytes ^ h.capacity_bytes;
+    for (const auto* descriptors : {&p.store, &p.load})
+        for (const auto& d : *descriptors)
+            for (const auto b : d.blocksAt(Tier::DEVICE))
+                sum += b;
+    for (const auto& t : impl_->group->copy3DTemplates())
+        sum +=
+            reinterpret_cast<uintptr_t>(t.device_base) ^ t.host_offset ^ t.width_bytes ^ t.layer_count ^ t.device_pitch;
+    return sum;
+}
+
+void Framework3DCopies::copy(size_t index, bool store) {
+    const auto& p = impl_->plans.at(index);
+    requireDone(impl_->strategy.tryExecute(
+                    p.hosts,
+                    store ? p.store : p.load,
+                    p.groups,
+                    {impl_->streams, store ? DeviceHostCopyDirection::D2H : DeviceHostCopyDirection::H2D}),
+                "production CUDA 3D batch");
+}
+
+void Framework3DCopies::copyOracle(void* contiguous, bool into_pools) {
+    auto* cursor = static_cast<unsigned char*>(contiguous);
+    for (const auto& pool : impl_->group->devicePools()) {
+        auto error = cudaMemcpy(into_pools ? pool->getBaseAddress() : cursor,
+                                into_pools ? cursor : pool->getBaseAddress(),
+                                pool->getTotalSizeBytes(),
+                                cudaMemcpyDeviceToDevice);
+        if (error != cudaSuccess)
+            throw std::runtime_error(cudaGetErrorString(error));
+        cursor += pool->getTotalSizeBytes();
+    }
+}
+
+void Framework3DCopies::poison(unsigned char value) {
+    for (const auto& pool : impl_->group->devicePools()) {
+        const auto error = cudaMemset(pool->getBaseAddress(), value, pool->getTotalSizeBytes());
+        if (error != cudaSuccess)
+            throw std::runtime_error(cudaGetErrorString(error));
+    }
+    const auto error = cudaDeviceSynchronize();
+    if (error != cudaSuccess)
+        throw std::runtime_error(cudaGetErrorString(error));
 }
 
 }  // namespace rtp_llm::crc_copy_benchmark

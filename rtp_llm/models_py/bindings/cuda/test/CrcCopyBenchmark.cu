@@ -34,7 +34,7 @@ namespace {
 constexpr int           kMaxBackings     = 32;
 constexpr int           kEvictMultiplier = 8;
 constexpr unsigned char deviceGuard      = 0xd3;
-const char*             syncNames[]{"copy1d_batch", "staged_no_crc"};
+const char*             syncNames[]{"copy1d_batch", "staged_no_crc", "copy3d_batch"};
 
 void requireSync(bool ok, std::string_view reason) {
     if (!ok)
@@ -214,12 +214,13 @@ __global__ void checkSyncPool(const unsigned char* actual,
 }
 
 struct Benchmark {
-    Workspace                  w;
-    FrameworkCopies            framework;
-    std::vector<unsigned char> cpuOracle;
-    std::vector<CheckLayer>    layers;
-    Buffer                     deviceOracle, deviceLayers, selectedBlocks, checkErrors;
-    volatile uintptr_t         metadataSink = 0;
+    Workspace                          w;
+    FrameworkCopies                    framework;
+    std::vector<unsigned char>         cpuOracle;
+    std::vector<CheckLayer>            layers;
+    std::unique_ptr<Framework3DCopies> threeD;
+    Buffer                             deviceOracle, deviceLayers, selectedBlocks, checkErrors;
+    volatile uintptr_t                 metadataSink = 0;
 
     Benchmark(Layout layout, size_t l2):
         w(layout, l2),
@@ -245,6 +246,12 @@ struct Benchmark {
         cu(cudaStreamSynchronize(w.stream.s));
     }
 
+    void initialize3D() {
+        threeD = std::make_unique<Framework3DCopies>(w.layout, w.poolBlocks, 0);
+        for (size_t i = 0; i < w.plans.size(); ++i)
+            requireSync(threeD->addPlan(w.plans[i]->items, w.plans[i]->blocks) == i, "3D plan index mismatch");
+    }
+
     void packCpuBlock(int block, unsigned char* output) const {
         size_t offset = 0;
         for (const auto& layer : layers) {
@@ -254,6 +261,8 @@ struct Benchmark {
     }
 
     void restoreDeviceOracle() {
+        if (threeD)
+            threeD->copyOracle(deviceOracle.p, true);
         cu(cudaMemcpyAsync(w.source->p, deviceOracle.p, w.sourceBytes, cudaMemcpyDeviceToDevice, w.stream.s));
         cu(cudaStreamSynchronize(w.stream.s));
     }
@@ -277,6 +286,8 @@ struct Benchmark {
         // All variants receive the same CPU-only priming; never dereference
         // a host payload or a GPU pointer while warming descriptor metadata.
         sum += w.plans[ix]->nativePlans->touchMetadata();
+        if (threeD)
+            sum += threeD->touchMetadata(ix);
         metadataSink = sum;
     }
 
@@ -285,12 +296,16 @@ struct Benchmark {
             framework.copyBatch(*w.plans[ix]->nativePlans, store);
         } else if (variant == 1) {
             framework.copyStaged(*w.plans[ix]->nativePlans, store);
+        } else if (variant == 2 && threeD) {
+            threeD->copy(ix, store);
         } else {
             throw std::runtime_error("unknown copy variant");
         }
     }
 
     void poisonDevice(size_t ix) {
+        if (threeD)
+            threeD->poison(deviceGuard);
         std::vector<unsigned char> selected(w.poolBlocks, 0);
         for (int block : w.plans[ix]->blocks)
             selected[block] = 1;
@@ -300,6 +315,8 @@ struct Benchmark {
     }
 
     void verifyDevice() {
+        if (threeD)
+            threeD->copyOracle(w.source->p, false);
         cu(cudaMemsetAsync(checkErrors.p, 0, sizeof(unsigned int), w.stream.s));
         checkSyncPool<<<dim3(unsigned(layers.size()), 32), 256, 0, w.stream.s>>>(
             w.source->bytes(),
@@ -365,6 +382,7 @@ struct Options {
     int         repeat          = 80;
     uint32_t    seed            = 20261004;
     bool        correctnessOnly = false;
+    bool        only3d          = false;
     bool        exclude1dH2d    = false;
     bool        seedProvided    = false;
     std::string output;
@@ -380,6 +398,10 @@ Options parseOptions(int argc, char** argv) {
     Options result;
     for (int i = 1; i < argc; ++i) {
         std::string key = argv[i];
+        if (key == "--3d-only") {
+            result.only3d = true;
+            continue;
+        }
         if (key == "--correctness-only") {
             result.correctnessOnly = true;
             continue;
@@ -391,7 +413,7 @@ Options parseOptions(int argc, char** argv) {
         if (key == "--help") {
             std::cout
                 << "CrcCopyBenchmark --output FILE [--iterations 100] [--warmup 30] [--repeat 80] [--seed UINT]\n"
-                   "                 [--correctness-only] [--exclude-1d-h2d]\n"
+                   "                 [--correctness-only] [--exclude-1d-h2d] [--3d-only]\n"
                    "Two production paths, both directions, FULL/SWA, local backing BS=1..32. CUDA13 required.\n"
                    "--exclude-1d-h2d explicitly omits that path; it never substitutes another copy implementation.\n";
             std::exit(0);
@@ -430,6 +452,7 @@ Options parseOptions(int argc, char** argv) {
     if (!result.seedProvided)
         result.seed = 20260924U + static_cast<uint32_t>(result.repeat);
     requireSync(!result.output.empty(), "--output FILE is required");
+    requireSync(!result.only3d || !result.exclude1dH2d, "3D-only mode cannot exclude 1D cases");
     return result;
 }
 
@@ -451,7 +474,7 @@ void metadata(std::ostream& os, const Options& options, const cudaDeviceProp& pr
        << "\""
        << ",\"shape_source\":\"CacheConfigCreator+DeviceBlockPoolConfigHelper\""
        << ",\"staged_no_crc_source\":\"release/btc_1.0 production StagedSmDeviceHostCopyStrategy\""
-       << ",\"variants\":[\"copy1d_batch\",\"staged_no_crc\"]"
+       << ",\"variants\":" << (options.only3d ? "[\"copy3d_batch\"]" : "[\"copy1d_batch\",\"staged_no_crc\"]")
        << ",\"exclude_1d_h2d\":" << (options.exclude1dH2d ? "true" : "false") << ",\"excluded_cases\":"
        << (options.exclude1dH2d ?
                "[{\"direction\":\"h2d\",\"variant\":\"copy1d_batch\",\"reason\":\"explicit --exclude-1d-h2d\"}]" :
@@ -489,7 +512,9 @@ int run(int argc, char** argv) {
     std::mt19937 source_rng(options.seed), order_rng(options.seed ^ 0x728193U);
     for (bool is_full : {true, false}) {
         Benchmark benchmark(orderedLayout(is_full), prop.l2CacheSize);
-        auto&     w = benchmark.w;
+        if (options.only3d)
+            benchmark.initialize3D();
+        auto& w = benchmark.w;
         os << "{\"type\":\"layout\",\"layout\":\"" << w.layout.name << "\",\"payload_bytes\":" << w.p
            << ",\"encoded_bytes\":" << w.e << ",\"host_stride\":" << w.hostStride << ",\"staging_stride\":" << w.stride
            << ",\"tiles\":" << w.layout.sizes.size() << ",\"tile_bytes\":[";
@@ -507,7 +532,7 @@ int run(int argc, char** argv) {
         benchmark.restoreDeviceOracle();
         for (bool store : {true, false}) {
             for (int n = 1; n <= kMaxBackings; ++n) {
-                for (int variant = 0; variant < 2; ++variant) {
+                for (int variant = options.only3d ? 2 : 0; variant < (options.only3d ? 3 : 2); ++variant) {
                     if (!store && variant == 0 && options.exclude1dH2d) {
                         os << "{\"type\":\"excluded_correctness\",\"direction\":\"h2d\",\"layout\":\"" << w.layout.name
                            << "\",\"blocks\":" << n
@@ -531,7 +556,7 @@ int run(int argc, char** argv) {
                 std::vector<int> sources(w.rotationCount(n));
                 std::iota(sources.begin(), sources.end(), 0);
                 std::shuffle(sources.begin(), sources.end(), source_rng);
-                std::vector<int> order{0, 1};
+                std::vector<int> order = options.only3d ? std::vector<int>{2} : std::vector<int>{0, 1};
                 if (!store && options.exclude1dH2d)
                     order.erase(order.begin());
                 for (int round = -options.warmup; round < options.iterations; ++round) {

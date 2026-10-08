@@ -80,4 +80,21 @@ private:
     std::unique_ptr<Impl> impl_;
 };
 
+// Real production pools/templates for the separately measured 3D path.
+// Preparation and oracle copies are explicitly outside the measured call.
+class Framework3DCopies {
+public:
+    Framework3DCopies(const Layout& layout, size_t blocks, int device);
+    ~Framework3DCopies();
+    size_t    addPlan(const std::vector<BenchmarkCopyItem>& items, const std::vector<int>& blocks);
+    uintptr_t touchMetadata(size_t plan) const;
+    void      copy(size_t plan, bool store);
+    void      copyOracle(void* contiguous, bool into_pools);
+    void      poison(unsigned char value);
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+};
+
 }  // namespace rtp_llm::crc_copy_benchmark
