@@ -138,3 +138,14 @@ cc_test(
     copts = test_copts,
     deps = test_deps,
 )
+
+cc_test(
+    name = "device_host_copy_template_test",
+    exec_properties = {"gpu": "A10"},
+    testonly = True,
+    srcs = ["DeviceHostCopyTemplateTest.cc"],
+    copts = test_copts,
+    tags = ["exclusive-if-local"],
+    deps = test_deps + [":block_transfer_engine_test_utils"],
+    env = {},
+)
