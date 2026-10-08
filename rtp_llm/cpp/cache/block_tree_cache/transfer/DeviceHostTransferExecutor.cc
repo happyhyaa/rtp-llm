@@ -17,9 +17,6 @@ namespace rtp_llm {
 namespace {
 
 std::string_view configurableStrategyName(const DeviceHostCopyStrategy& strategy) {
-    if (dynamic_cast<const Cuda3DBatchDeviceHostCopyStrategy*>(&strategy) != nullptr) {
-        return "cuda_3d_batch";
-    }
     if (dynamic_cast<const CudaBatchDeviceHostCopyStrategy*>(&strategy) != nullptr) {
         return "cuda_batch";
     }
@@ -40,7 +37,6 @@ DeviceHostTransferExecutor::DeviceHostTransferExecutor(BlockTreeTaskPool&    tra
                                                        std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter):
     TransferExecutor(transfer_task_pool, max_descriptors_per_batch, std::move(metrics_reporter)),
     options_(std::move(options)) {
-    strategies_.push_back(std::make_unique<Cuda3DBatchDeviceHostCopyStrategy>());
     strategies_.push_back(std::make_unique<CudaBatchDeviceHostCopyStrategy>());
     strategies_.push_back(std::make_unique<StagedSmDeviceHostCopyStrategy>());
     strategies_.push_back(std::make_unique<GenericMultiCopyDeviceHostCopyStrategy>());
@@ -65,67 +61,55 @@ DeviceHostTransferExecutor::DeviceHostTransferExecutor(BlockTreeTaskPool&    tra
 TransferStatus DeviceHostTransferExecutor::executeBatch(const std::vector<HostBufferView>&     hosts,
                                                         const std::vector<TransferDescriptor>& descriptors,
                                                         const std::vector<const GroupSet*>&    group_sets) {
-    if (descriptors.empty() || hosts.size() != descriptors.size() || group_sets.size() != descriptors.size()) {
-        return TransferStatus::INVALID_ARGS;
+    auto [status, plans] = generatePlan(hosts, descriptors, group_sets);
+    if (status != TransferStatus::OK) {
+        return status;
     }
-    const bool device_to_host = descriptors.front().target_tier != Tier::DEVICE;
-    int        device_index   = -1;
-    // Validate the batch without materializing tiles. This executor owns one GPU's streams.
-    for (size_t i = 0; i < descriptors.size(); ++i) {
-        const auto* group = group_sets[i];
-        if (group == nullptr || (descriptors[i].target_tier != Tier::DEVICE) != device_to_host) {
+    std::vector<DeviceHostCopyExecutionContext> contexts;
+    contexts.reserve(plans.size());
+    for (const auto& plan : plans) {
+        if (plan.copy_tiles.empty()) {
             return TransferStatus::INVALID_ARGS;
         }
-        const auto& pools  = group->devicePools();
-        const auto& blocks = descriptors[i].blocksAt(Tier::DEVICE);
-        if (pools.empty() || pools.size() != group->groupIds().size() || blocks.size() != pools.size()
-            || !isValidHostBufferView(hosts[i], group->payloadBytes(), group->payloadBytes())
-            || reinterpret_cast<uintptr_t>(hosts[i].base) > UINTPTR_MAX - group->payloadBytes()) {
-            return hosts[i].base == nullptr ? TransferStatus::DEVICE_IO_ERROR : TransferStatus::INVALID_ARGS;
-        }
-        for (size_t member = 0; member < pools.size(); ++member) {
-            const auto& pool = pools[member];
-            if (!pool || pool->deviceIndex() < 0 || blocks[member] < 0
-                || static_cast<size_t>(blocks[member]) >= pool->memoryLayouts().front().block_num) {
-                return TransferStatus::INVALID_ARGS;
-            }
-            if (device_index < 0) {
-                device_index = pool->deviceIndex();
-            } else if (device_index != pool->deviceIndex()) {
+        const int device_index = plan.copy_tiles.front().device_index;
+        for (const auto& tile : plan.copy_tiles) {
+            if (tile.device_index != device_index) {
                 return TransferStatus::INVALID_ARGS;
             }
         }
+        std::call_once(copy_streams_once_,
+                       [this, device_index] { copy_streams_ = acquireDeviceHostCopyStreams(device_index); });
+        if (copy_streams_->device_index != device_index) {
+            RTP_LLM_LOG_WARNING("copy plan device=%d differs from executor device=%d group_set=%zu",
+                                device_index,
+                                copy_streams_->device_index,
+                                plan.group_set_id);
+            return TransferStatus::INVALID_ARGS;
+        }
+        const DeviceHostCopyExecutionContext context{
+            copy_streams_, plan.device_to_host ? DeviceHostCopyDirection::D2H : DeviceHostCopyDirection::H2D};
+        contexts.push_back(context);
     }
-    std::call_once(copy_streams_once_,
-                   [this, device_index] { copy_streams_ = acquireDeviceHostCopyStreams(device_index); });
-    if (copy_streams_->device_index != device_index) {
-        return TransferStatus::INVALID_ARGS;
-    }
-    const DeviceHostCopyExecutionContext context{
-        copy_streams_, device_to_host ? DeviceHostCopyDirection::D2H : DeviceHostCopyDirection::H2D};
-    std::vector<DeviceHostCopyPlan> plans;
-    for (auto& strategy : strategies_) {
-        StrategyResult result;
-        if (auto* copy3d = dynamic_cast<Cuda3DBatchDeviceHostCopyStrategy*>(strategy.get())) {
-            result = copy3d->tryExecute(hosts, descriptors, group_sets, context);
-        } else {
-            if (plans.empty()) {
-                auto generated = generatePlan(hosts, descriptors, group_sets);
-                if (generated.first != TransferStatus::OK) {
-                    return generated.first;
-                }
-                plans = std::move(generated.second);
+    for (size_t plan_index = 0; plan_index < plans.size(); ++plan_index) {
+        const auto& plan    = plans[plan_index];
+        const auto& context = contexts[plan_index];
+        bool handled = false;
+        for (auto& strategy : strategies_) {
+            auto result = strategy->tryExecute(plan, options_, context);
+            if (result.status == StrategyStatus::DONE) {
+                handled = true;
+                break;
             }
-            result = strategy->tryExecute(plans.front(), options_, context);
+            if (result.status == StrategyStatus::FAILED) {
+                return result.copy_status;
+            }
         }
-        if (result.status == StrategyStatus::DONE) {
-            return TransferStatus::OK;
-        }
-        if (result.status == StrategyStatus::FAILED) {
-            return result.copy_status;
+        if (!handled) {
+            RTP_LLM_LOG_WARNING("no strategy handled copy plan group_set=%zu", plan.group_set_id);
+            return TransferStatus::DEVICE_IO_ERROR;
         }
     }
-    return TransferStatus::DEVICE_IO_ERROR;
+    return TransferStatus::OK;
 }
 
 std::pair<TransferStatus, std::vector<DeviceHostCopyPlan>>
