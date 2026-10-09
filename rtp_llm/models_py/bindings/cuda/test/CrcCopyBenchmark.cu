@@ -833,7 +833,8 @@ void metadata(std::ostream& os, const Options& options, const cudaDeviceProp& pr
        << ",\"copy3d_submit_mutex\":\"benchmark-local mutex; production private mutex is not exported\""
        << ",\"host_input\":\"independent CPU whole-record oracle prepared outside timing\""
        << ",\"block_counts\":[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32]"
-       << ",\"seq_size_per_block\":128,\"cp_size\":1,\"tp_size\":1,\"cp_mode\":\"NONE\""
+       << ",\"seq_size_per_block\":1024,\"kernel_seq_size_per_block\":128"
+       << ",\"cp_size\":1,\"tp_size\":1,\"cp_mode\":\"NONE\""
        << ",\"h2d_host_payload\":\"recently prepared on CPU once per shared round; host cache is not claimed cold\",\"fallback_allowed\":false}\n";
 }
 
@@ -992,7 +993,8 @@ int runTileThreadProfile(
        << "\",\"sm\":" << prop.major * 10 + prop.minor << ",\"driver\":" << driver << ",\"runtime\":" << runtime
        << ",\"l2_bytes\":" << prop.l2CacheSize << ",\"evict_multiplier\":" << kEvictMultiplier
        << ",\"timing\":\"cuda_event_stream_latency\",\"regime\":\"cold\""
-       << ",\"seq_size_per_block\":128,\"cp_size\":1,\"tp_size\":1,\"cp_mode\":\"NONE\""
+       << ",\"seq_size_per_block\":1024,\"kernel_seq_size_per_block\":128"
+       << ",\"cp_size\":1,\"tp_size\":1,\"cp_mode\":\"NONE\""
        << ",\"profile_capture\":" << (options.profileCapture ? "true" : "false")
        << ",\"boundary\":\"production launchCopyTiles only between CUDA events; descriptors preuploaded; independent 8xL2 eviction before every candidate outside events; no PCIe payload copy or CRC in interval; event latency may include launch gaps\"}\n";
     std::mt19937 sourceRng(options.seed), orderRng(options.seed ^ 0x728193U);

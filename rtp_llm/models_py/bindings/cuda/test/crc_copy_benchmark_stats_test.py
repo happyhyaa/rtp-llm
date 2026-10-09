@@ -46,7 +46,8 @@ def fixture(exclude=False, correctness_only=False, repeat=80):
         base_commit="b" * 40,
         binary_sha256="c" * 64,
         local_backing_count=True,
-        seq_size_per_block=128,
+        seq_size_per_block=1024,
+        kernel_seq_size_per_block=128,
         cp_size=1,
         tp_size=1,
         cp_mode="NONE",
@@ -92,7 +93,7 @@ def fixture(exclude=False, correctness_only=False, repeat=80):
                 payload_bytes=payload,
                 encoded_bytes=encoded,
                 host_stride=(encoded + 4095) // 4096 * 4096,
-                staging_stride=4940176,
+                staging_stride=39521296,
                 host_pinned_verified=True,
                 source_device_verified=True,
                 copy3d_operations_per_backing=3,
@@ -168,10 +169,21 @@ class BenchmarkStatsTest(unittest.TestCase):
         _, second = fixture(exclude=True, repeat=81)
         result = analyze([self.write(first, "80.jsonl"), self.write(second, "81.jsonl")], settings)
         for case in result["cases"]:
-            expected_bytes = 510912 if case["layout"] == "full" else 4940160
+            expected_bytes = 4087296 if case["layout"] == "full" else 39521280
             for stats in case["variants"].values():
                 self.assertAlmostEqual(stats["payload_GBps_at_p50"] * stats["p50_us"] * 1000,
-                                       case["blocks"] * expected_bytes)
+                                       case["blocks"] * expected_bytes, delta=1e-6)
+
+    def test_rejects_wrong_logical_or_kernel_tokens_per_block(self):
+        for field, value in (
+            ("seq_size_per_block", 128),
+            ("kernel_seq_size_per_block", 1024),
+        ):
+            with self.subTest(field=field):
+                settings, records = fixture(exclude=True)
+                records[0][field] = value
+                with self.assertRaises(ValueError):
+                    read_run(self.write(records), settings, 80)
 
     def test_rejects_pro_parallelism(self):
         settings, records = fixture(exclude=True)

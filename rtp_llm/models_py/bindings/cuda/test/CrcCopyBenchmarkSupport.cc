@@ -38,7 +38,7 @@ CacheConfig flashCacheConfig() {
     model.attn_config.indexer_topk            = 512;
     model.attn_config.o_groups                = 8;
     model.attn_config.o_lora_rank             = 1024;
-    model.attn_config.tokens_per_block        = 128;
+    model.attn_config.tokens_per_block        = 1024;
     model.attn_config.kernel_tokens_per_block = 128;
     model.attn_config.kv_cache_dtype          = KvCacheDataType::FP8;
     model.attn_config.layer_compress_ratios   = {0, 0};

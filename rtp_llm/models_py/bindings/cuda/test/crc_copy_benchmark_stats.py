@@ -23,16 +23,17 @@ BLOCKS = tuple(range(1, 33))
 # obtains its tile geometry from CacheConfigCreator, not from this table.
 FLASH_RATIO4_LAYERS = list(range(2, 43, 2))
 FLASH_RATIO128_LAYERS = list(range(3, 43, 2))
+FLASH_LOGICAL_TO_KERNEL_BLOCKS = 1024 // 128
 GROUPS = {
     "full": [
-        ("csa_kv", 19008, FLASH_RATIO4_LAYERS),
-        ("indexer_kv", 4224, FLASH_RATIO4_LAYERS),
-        ("hca_kv", 1152, FLASH_RATIO128_LAYERS),
+        ("csa_kv", 19008 * FLASH_LOGICAL_TO_KERNEL_BLOCKS, FLASH_RATIO4_LAYERS),
+        ("indexer_kv", 4224 * FLASH_LOGICAL_TO_KERNEL_BLOCKS, FLASH_RATIO4_LAYERS),
+        ("hca_kv", 1152 * FLASH_LOGICAL_TO_KERNEL_BLOCKS, FLASH_RATIO128_LAYERS),
     ],
     "swa": [
-        ("swa_kv", 74880, list(range(43))),
-        ("indexer_state", 16384, FLASH_RATIO4_LAYERS),
-        ("csa_state", 65536, FLASH_RATIO4_LAYERS),
+        ("swa_kv", 74880 * FLASH_LOGICAL_TO_KERNEL_BLOCKS, list(range(43))),
+        ("indexer_state", 16384 * FLASH_LOGICAL_TO_KERNEL_BLOCKS, FLASH_RATIO4_LAYERS),
+        ("csa_state", 65536 * FLASH_LOGICAL_TO_KERNEL_BLOCKS, FLASH_RATIO4_LAYERS),
     ],
 }
 TILES = {
@@ -121,7 +122,8 @@ def read_run(path, settings, repeat):
         "layout_order": "production",
         "shape_source": "CacheConfigCreator+DeviceBlockPoolConfigHelper",
         "local_backing_count": True,
-        "seq_size_per_block": 128,
+        "seq_size_per_block": 1024,
+        "kernel_seq_size_per_block": 128,
         "cp_size": 1,
         "tp_size": 1,
         "cp_mode": "NONE",
@@ -187,9 +189,10 @@ def read_run(path, settings, repeat):
         "mixed_crc_selftest": 1,
         "correctness": len(matrix),
         "crc_corruption": 8,
-        "sample": len(matrix) * rounds,
         "complete": 1,
     }
+    if rounds:
+        expected_counts["sample"] = len(matrix) * rounds
     if exclude:
         expected_counts["excluded_correctness"] = 64
     counts = collections.Counter(r["type"] for r in records)
@@ -208,7 +211,7 @@ def read_run(path, settings, repeat):
             "payload_bytes": payload,
             "encoded_bytes": encoded,
             "host_stride": (encoded + 4095) // 4096 * 4096,
-            "staging_stride": 4940176,
+            "staging_stride": 39521296,
             "host_pinned_verified": True,
             "source_device_verified": True,
             "copy3d_operations_per_backing": 3,
@@ -525,7 +528,7 @@ def write_results(result, output):
     lines = [
         f"Source: `{meta['source_commit']}`; main base: `{meta['base_commit']}`.",
         f"GPU: {meta['gpu']} (SM{meta['sm']}); CUDA runtime: {meta['runtime']}.",
-        "DeepSeek V4 Flash FP8, TP1/CP1, seq/kernel block 128, gen_num_per_cycle=0.",
+        "DeepSeek V4 Flash FP8, TP1/CP1; logical tokens/block=1024, kernel tokens/block=128, gen_num_per_cycle=0.",
         "",
         "Complete synchronous call latency, p50 / p95 (us).",
         "",
