@@ -47,9 +47,9 @@ def fixture(exclude=False, correctness_only=False, repeat=80):
         binary_sha256="c" * 64,
         local_backing_count=True,
         seq_size_per_block=128,
-        cp_size=8,
-        tp_size=8,
-        cp_mode="CP_RR",
+        cp_size=1,
+        tp_size=1,
+        cp_mode="NONE",
         gen_num_per_cycle=0,
         fallback_allowed=False,
         l2_bytes=1024,
@@ -92,7 +92,7 @@ def fixture(exclude=False, correctness_only=False, repeat=80):
                 payload_bytes=payload,
                 encoded_bytes=encoded,
                 host_stride=(encoded + 4095) // 4096 * 4096,
-                staging_stride=878176,
+                staging_stride=4940176,
                 host_pinned_verified=True,
                 source_device_verified=True,
                 copy3d_operations_per_backing=3,
@@ -163,6 +163,22 @@ def fixture(exclude=False, correctness_only=False, repeat=80):
 
 
 class BenchmarkStatsTest(unittest.TestCase):
+    def test_flash_payload_used_for_throughput(self):
+        settings, first = fixture(exclude=True)
+        _, second = fixture(exclude=True, repeat=81)
+        result = analyze([self.write(first, "80.jsonl"), self.write(second, "81.jsonl")], settings)
+        for case in result["cases"]:
+            expected_bytes = 510912 if case["layout"] == "full" else 4940160
+            for stats in case["variants"].values():
+                self.assertAlmostEqual(stats["payload_GBps_at_p50"] * stats["p50_us"] * 1000,
+                                       case["blocks"] * expected_bytes)
+
+    def test_rejects_pro_parallelism(self):
+        settings, records = fixture(exclude=True)
+        records[0].update(cp_size=8, tp_size=8, cp_mode="CP_RR")
+        with self.assertRaises(ValueError):
+            read_run(self.write(records), settings, 80)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)

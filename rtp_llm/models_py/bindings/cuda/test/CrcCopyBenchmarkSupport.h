@@ -33,7 +33,7 @@ struct Layout {
 
 // Resolve model specs through main's CacheConfigCreator and physical pool
 // helper. These functions describe one local, prefix-reusable backing.
-const Layout& deepSeekV4ProLayout(bool full);
+const Layout& deepSeekV4FlashLayout(bool full);
 size_t        maximumLayoutTiles();
 size_t        maximumLayoutPayload();
 

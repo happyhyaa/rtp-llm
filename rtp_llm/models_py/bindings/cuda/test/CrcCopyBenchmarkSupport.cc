@@ -24,42 +24,41 @@ void requireDone(const StrategyResult& result, const char* name) {
     }
 }
 
-CacheConfig proCacheConfig() {
+CacheConfig flashCacheConfig() {
     ModelConfig model;
-    model.num_layers                          = 61;
-    model.hidden_size                         = 7168;
-    model.attn_config.head_num                = 128;
+    model.num_layers                          = 43;
+    model.hidden_size                         = 4096;
+    model.attn_config.head_num                = 64;
     model.attn_config.kv_head_num             = 1;
     model.attn_config.size_per_head           = 512;
     model.attn_config.rope_head_dim           = 64;
     model.attn_config.sliding_window          = 128;
     model.attn_config.indexer_head_dim        = 128;
     model.attn_config.indexer_head_num        = 64;
-    model.attn_config.indexer_topk            = 1024;
-    model.attn_config.o_groups                = 16;
+    model.attn_config.indexer_topk            = 512;
+    model.attn_config.o_groups                = 8;
     model.attn_config.o_lora_rank             = 1024;
     model.attn_config.tokens_per_block        = 128;
     model.attn_config.kernel_tokens_per_block = 128;
     model.attn_config.kv_cache_dtype          = KvCacheDataType::FP8;
-    model.attn_config.layer_compress_ratios   = {128, 128};
-    for (int layer = 2; layer < 61; ++layer)
+    model.attn_config.layer_compress_ratios   = {0, 0};
+    for (int layer = 2; layer < 43; ++layer)
         model.attn_config.layer_compress_ratios.push_back(layer % 2 == 0 ? 4 : 128);
     model.hybrid_attention_config.enable_hybrid_attention = true;
     test::setDsv4KvCacheSpecs(model, model.attn_config.layer_compress_ratios);
 
     ParallelismConfig parallel;
     parallel.role_type                          = RoleType::PREFILL;
-    parallel.tp_size                            = 8;
-    parallel.world_size                         = 8;
-    parallel.prefill_cp_config.method           = CPRotateMethod::ALL_GATHER;
-    parallel.prefill_cp_config.kv_cache_sharded = true;
-    parallel.prefill_cp_config.prefill_cp_size  = 8;
+    parallel.tp_size                            = 1;
+    parallel.world_size                         = 1;
+    parallel.prefill_cp_config.kv_cache_sharded = false;
+    parallel.prefill_cp_config.prefill_cp_size  = 1;
     return CacheConfigCreator::createWarmupConfig(model, parallel, /*gen_num_per_cycle=*/0);
 }
 
 Layout deriveLayout(const CacheConfig& config, bool full) {
     Layout result;
-    result.name            = full ? "full" : "prefill_cp8_no_spec_swa";
+    result.name            = full ? "full" : "swa";
     const auto type        = full ? CacheGroupType::FULL : CacheGroupType::SWA;
     size_t     pool_offset = 0, member = 0;
     for (const auto& group : config.topology().groups()) {
@@ -127,19 +126,19 @@ std::string Layout::geometryJson() const {
     return os.str();
 }
 
-const Layout& deepSeekV4ProLayout(bool full) {
-    static const auto config      = proCacheConfig();
+const Layout& deepSeekV4FlashLayout(bool full) {
+    static const auto config      = flashCacheConfig();
     static const auto full_layout = deriveLayout(config, true);
     static const auto swa_layout  = deriveLayout(config, false);
     return full ? full_layout : swa_layout;
 }
 
 size_t maximumLayoutTiles() {
-    return std::max(deepSeekV4ProLayout(true).sizes.size(), deepSeekV4ProLayout(false).sizes.size());
+    return std::max(deepSeekV4FlashLayout(true).sizes.size(), deepSeekV4FlashLayout(false).sizes.size());
 }
 
 size_t maximumLayoutPayload() {
-    return std::max(deepSeekV4ProLayout(true).payload(), deepSeekV4ProLayout(false).payload());
+    return std::max(deepSeekV4FlashLayout(true).payload(), deepSeekV4FlashLayout(false).payload());
 }
 
 struct FrameworkCopyPlan::Impl {
