@@ -10,6 +10,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from crc_copy_benchmark_config import resolve_benchmark_config
 from crc_copy_benchmark_stats import analyze, write_results
 
 
@@ -90,6 +91,13 @@ def main():
     parser.add_argument("--iterations", type=int, default=100)
     parser.add_argument("--warmup", type=int, default=30)
     parser.add_argument("--seed", type=int, default=20260924)
+    parser.add_argument("--model", choices=("pro", "flash"), default="flash")
+    parser.add_argument("--logical-tokens-per-block", type=int)
+    parser.add_argument("--kernel-tokens-per-block", type=int)
+    parser.add_argument(
+        "--block-counts",
+        help="Comma-separated local backing counts, e.g. 1,8,16,24,32; default 1..32",
+    )
     parser.add_argument(
         "--cpu", default="auto", help="NUMA-local CPU (auto), a CPU index, or none"
     )
@@ -111,6 +119,15 @@ def main():
         parser.error(
             "iterations must be positive, warmup nonnegative, seed in [0, 2147483566]"
         )
+    try:
+        cache_config = resolve_benchmark_config(
+            args.model,
+            args.logical_tokens_per_block,
+            args.kernel_tokens_per_block,
+            args.block_counts,
+        )
+    except (TypeError, ValueError) as error:
+        parser.error(str(error))
     output = args.output_dir.resolve()
     output.mkdir(parents=True, exist_ok=True)
     if any(
@@ -142,6 +159,12 @@ def main():
             "correctness_only",
         )
     }
+    settings.update(
+        model=cache_config["model"],
+        logical_tokens_per_block=cache_config["logical_tokens_per_block"],
+        kernel_tokens_per_block=cache_config["kernel_tokens_per_block"],
+        block_counts=cache_config["block_counts"],
+    )
     manifest["settings"] = settings
     manifest_path = output / "run_manifest.json"
     try:
@@ -175,6 +198,14 @@ def main():
                 str(repeat),
                 "--seed",
                 str(args.seed + repeat),
+                "--model",
+                cache_config["model"],
+                "--logical-tokens-per-block",
+                str(cache_config["logical_tokens_per_block"]),
+                "--kernel-tokens-per-block",
+                str(cache_config["kernel_tokens_per_block"]),
+                "--block-counts",
+                ",".join(map(str, cache_config["block_counts"])),
                 "--output",
                 str(raw),
             ]

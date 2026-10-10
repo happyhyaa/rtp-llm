@@ -21,6 +21,7 @@
 #include <mutex>
 #include <numeric>
 #include <random>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -37,6 +38,20 @@ constexpr int           kMaxBackings     = 32;
 constexpr int           kEvictMultiplier = 8;
 constexpr unsigned char deviceGuard      = 0xd3;
 const char*             syncNames[]{"integrated_crc", "copy1d_batch", "copy3d_batch", "staged_no_crc", "gather_control"};
+
+struct CacheShapeOptions {
+    std::string model{"flash"};
+    uint32_t    logicalTokensPerBlock{0};
+    uint32_t    kernelTokensPerBlock{0};
+    bool        logicalTokensProvided{false};
+    bool        kernelTokensProvided{false};
+    std::vector<int> blockCounts;
+
+    CacheShapeOptions() {
+        for (int n = 1; n <= kMaxBackings; ++n)
+            blockCounts.push_back(n);
+    }
+};
 
 void requireSync(bool ok, std::string_view reason) {
     if (!ok)
@@ -131,14 +146,9 @@ void knownVector() {
     requireSync(cpuCrc(bytes, 9) == 0xe3069283U, "CPU CRC32C oracle does not match the standard vector");
 }
 
-const Layout& orderedLayout(bool full) {
-    return deepSeekV4FlashLayout(full);
-}
-const Layout& full() {
-    return orderedLayout(true);
-}
-const Layout& swa() {
-    return orderedLayout(false);
+Layout orderedLayout(bool full, const CacheShapeOptions& shape) {
+    return deepSeekV4Layout(
+        shape.model, shape.logicalTokensPerBlock, shape.kernelTokensPerBlock, full);
 }
 
 // A test-only gathered-record control: identical record stride and transfer
@@ -147,14 +157,15 @@ const Layout& swa() {
 // is not the production staged strategy or an exact ablation of future CRC code.
 class GatherControl {
 public:
-    explicit GatherControl(size_t max_payload):
+    explicit GatherControl(size_t max_payload, size_t max_tiles):
         maxPayload_(max_payload),
+        maxTiles_(max_tiles),
         stride_(CrcBlockCopyBatch::encodedBytes(max_payload)),
         staging_(kMaxBackings * stride_),
-        deviceTiles_(kMaxBackings * maximumLayoutTiles() * sizeof(CopyTile)),
+        deviceTiles_(kMaxBackings * maxTiles_ * sizeof(CopyTile)),
         deviceInputs_(kMaxBackings * sizeof(void*)),
         deviceLengths_(kMaxBackings * sizeof(size_t)),
-        hostTiles_(kMaxBackings * maximumLayoutTiles() * sizeof(CopyTile), true),
+        hostTiles_(kMaxBackings * maxTiles_ * sizeof(CopyTile), true),
         hostInputs_(kMaxBackings * sizeof(void*), true),
         hostLengths_(kMaxBackings * sizeof(size_t), true) {
         cu(cudaMemsetAsync(staging_.p, 0, kMaxBackings * stride_, stream_.s));
@@ -191,7 +202,7 @@ private:
                 if (address < other + other_bytes && other < address + encoded)
                     return false;
             }
-            if (item.tiles.empty() || item.tiles.size() > kMaxBackings * maximumLayoutTiles() - total_tiles)
+            if (item.tiles.empty() || item.tiles.size() > kMaxBackings * maxTiles_ - total_tiles)
                 return false;
             total_tiles += item.tiles.size();
             size_t offset = 0;
@@ -243,7 +254,7 @@ private:
         cu(cudaStreamSynchronize(stream_.s));
         return CrcCopyStatus::OK;
     }
-    size_t     maxPayload_, stride_;
+    size_t     maxPayload_, maxTiles_, stride_;
     Stream     stream_;
     Buffer     staging_, deviceTiles_, deviceInputs_, deviceLengths_, hostTiles_, hostInputs_, hostLengths_;
     std::mutex mutex_;
@@ -265,10 +276,10 @@ struct Workspace {
     std::vector<size_t>                planStarts;
     std::vector<int>                   rotationCounts;
 
-    Workspace(Layout shape, size_t l2): layout(std::move(shape)) {
+    Workspace(Layout shape, size_t l2, size_t maxPayload): layout(std::move(shape)) {
         p                    = layout.payload();
         e                    = CrcBlockCopyBatch::encodedBytes(p);
-        stride               = CrcBlockCopyBatch::encodedBytes(maximumLayoutPayload());
+        stride               = CrcBlockCopyBatch::encodedBytes(maxPayload);
         hostStride           = alignUp(e, 4096);
         const size_t minimum = std::max(kEvictMultiplier * l2, size_t(4 * kMaxBackings) * p);
         poolBlocks           = int((minimum + p - 1) / p) + 1;  // block 0 is the framework sentinel
@@ -356,11 +367,11 @@ struct Benchmark {
     volatile uintptr_t         metadataSink = 0;
     std::mutex                 copyMutex;
 
-    Benchmark(Layout layout, size_t l2):
-        w(layout, l2),
+    Benchmark(Layout layout, size_t l2, size_t maxPayload, size_t maxTiles):
+        w(layout, l2, maxPayload),
         framework(0),
-        production(0, kMaxBackings, maximumLayoutPayload(), kMaxBackings * maximumLayoutTiles()),
-        control(maximumLayoutPayload()),
+        production(0, kMaxBackings, maxPayload, kMaxBackings * maxTiles),
+        control(maxPayload, maxTiles),
         cpuOracle(w.sourceBytes),
         recordCrc(w.poolBlocks),
         deviceOracle(w.sourceBytes),
@@ -628,13 +639,23 @@ struct Benchmark {
 // shapes. It checks GPU bytes against CPU records, including guards after every
 // item; a store/load round trip alone would miss a shared serialization bug.
 template<class Backend>
-static void mixedCrcSelfTest() {
-    const size_t               maxPayload = maximumLayoutPayload(), slot = alignUp(maxPayload + 64, 16);
+static void mixedCrcSelfTest(const Layout& fullLayout,
+                             const Layout& swaLayout,
+                             size_t        maxPayload,
+                             size_t        maxTiles) {
+    const size_t               slot = alignUp(maxPayload + 64, 16);
     const size_t               hostSlot = alignUp(maxPayload + 64, 16);
     Buffer                     device(32 * slot), host(32 * hostSlot, true);
     Stream                     setup;
-    Backend                    backend(0, 32, maxPayload, 32 * 3);
-    const std::vector<size_t>  sizes{16383, 16384, 16385, 32768, 32769, 35, full().payload(), swa().payload()};
+    Backend                    backend(0, 32, maxPayload, 32 * maxTiles);
+    const std::vector<size_t>  sizes{16383,
+                                    16384,
+                                    16385,
+                                    32768,
+                                    32769,
+                                    35,
+                                    fullLayout.payload(),
+                                    swaLayout.payload()};
     std::vector<unsigned char> expected(32 * slot), observed(32 * slot);
     int                        round = 0;
     for (int n : {32, 1, 7, 8, 32}) {
@@ -723,6 +744,7 @@ struct Options {
     bool        exclude1dH2d      = false;
     bool        seedProvided      = false;
     std::string output;
+    CacheShapeOptions cache;
 };
 uint32_t parseUnsigned(const std::string& text, const char* name) {
     requireSync(!text.empty() && text.front() != '-', std::string("invalid ") + name);
@@ -754,8 +776,10 @@ Options parseOptions(int argc, char** argv) {
         if (key == "--help") {
             std::cout
                 << "CrcCopyBenchmark --output FILE [--iterations 100] [--warmup 30] [--repeat 80] [--seed UINT]\n"
-                   "                 [--correctness-only] [--exclude-1d-h2d] [--tile-thread-profile] [--profile-capture]\n"
-                   "Five paths, both directions, FULL/SWA, local backing BS=1..32. CUDA13 required.\n"
+                   "                 [--model pro|flash] [--logical-tokens-per-block N] [--kernel-tokens-per-block N]\n"
+                   "                 [--block-counts 1,8,16,24,32] [--correctness-only] [--exclude-1d-h2d]\n"
+                   "                 [--tile-thread-profile] [--profile-capture]\n"
+                   "Five paths, both directions, FULL/SWA. CUDA13 required.\n"
                    "--exclude-1d-h2d explicitly omits that path; it never substitutes another copy implementation.\n";
             std::exit(0);
         }
@@ -772,6 +796,32 @@ Options parseOptions(int argc, char** argv) {
             result.output = value;
             continue;
         }
+        if (key == "--model") {
+            result.cache.model = value;
+            continue;
+        }
+        if (key == "--block-counts") {
+            result.cache.blockCounts.clear();
+            requireSync(!value.empty() && value.front() != ',' && value.back() != ','
+                            && value.find(",,") == std::string::npos,
+                        "--block-counts must be comma-separated integers without empty entries");
+            std::stringstream stream(value);
+            std::string item;
+            std::set<int> seen;
+            while (std::getline(stream, item, ',')) {
+                const auto first = item.find_first_not_of(" \t");
+                const auto last = item.find_last_not_of(" \t");
+                item = first == std::string::npos ? std::string{} : item.substr(first, last - first + 1);
+                const auto count = parseUnsigned(item, "--block-counts");
+                requireSync(count >= 1 && count <= kMaxBackings,
+                            "every --block-counts value must be in [1,32]");
+                requireSync(seen.insert(static_cast<int>(count)).second,
+                            "--block-counts must not contain duplicates");
+                result.cache.blockCounts.push_back(static_cast<int>(count));
+            }
+            requireSync(!result.cache.blockCounts.empty(), "--block-counts must not be empty");
+            continue;
+        }
         const auto number = parseUnsigned(value, key.c_str());
         if (key == "--seed") {
             result.seed         = number;
@@ -785,6 +835,13 @@ Options parseOptions(int argc, char** argv) {
             result.warmup = static_cast<int>(number);
         else if (key == "--repeat")
             result.repeat = static_cast<int>(number);
+        else if (key == "--logical-tokens-per-block") {
+            result.cache.logicalTokensPerBlock = number;
+            result.cache.logicalTokensProvided = true;
+        } else if (key == "--kernel-tokens-per-block") {
+            result.cache.kernelTokensPerBlock = number;
+            result.cache.kernelTokensProvided = true;
+        }
         else
             throw std::runtime_error("unknown option: " + key);
     }
@@ -792,11 +849,25 @@ Options parseOptions(int argc, char** argv) {
                 "iterations must be positive and iterations+warmup must fit INT_MAX");
     if (!result.seedProvided)
         result.seed = 20260924U + static_cast<uint32_t>(result.repeat);
+    (void)dsv4BenchmarkModelInfo(result.cache.model);
+    if (!result.cache.logicalTokensProvided)
+        result.cache.logicalTokensPerBlock = result.cache.model == "pro" ? 128 : 1024;
+    if (!result.cache.kernelTokensProvided)
+        result.cache.kernelTokensPerBlock = 128;
+    requireSync(result.cache.kernelTokensPerBlock >= 128 && result.cache.kernelTokensPerBlock % 128 == 0,
+                "compressed DSV4 kernel tokens/block must be a positive multiple of 128");
+    requireSync(result.cache.logicalTokensPerBlock >= result.cache.kernelTokensPerBlock
+                    && result.cache.logicalTokensPerBlock % result.cache.kernelTokensPerBlock == 0,
+                "logical tokens/block must be >= kernel tokens/block and divisible by it");
+    for (const int ratio : {128, 4})
+        requireSync(result.cache.kernelTokensPerBlock % ratio == 0,
+                    "kernel tokens/block must be divisible by every model compression ratio");
     requireSync(!result.output.empty(), "--output FILE is required");
     return result;
 }
 
 void metadata(std::ostream& os, const Options& options, const cudaDeviceProp& prop, int driver, int runtime) {
+    const auto modelInfo = dsv4BenchmarkModelInfo(options.cache.model);
     std::ostringstream uuid;
     uuid << "GPU-" << std::hex << std::setfill('0');
     for (int i = 0; i < 16; ++i) {
@@ -812,6 +883,7 @@ void metadata(std::ostream& os, const Options& options, const cudaDeviceProp& pr
        << ",\"source_commit\":\"" << provenance("CRC_BENCH_SOURCE_COMMIT")
        << "\",\"base_commit\":\"" << provenance("CRC_BENCH_BASE_COMMIT")
        << "\",\"binary_sha256\":\"" << provenance("CRC_BENCH_BINARY_SHA256") << "\""
+       << ",\"model\":\"" << modelInfo.name << "\""
        << ",\"shape_source\":\"CacheConfigCreator+DeviceBlockPoolConfigHelper\""
        << ",\"staged_no_crc_source\":\"rebased production StagedSmDeviceHostCopyStrategy with shared CopyTileKernel\""
        << ",\"variants\":[\"integrated_crc\",\"copy1d_batch\",\"copy3d_batch\",\"staged_no_crc\",\"gather_control\"]"
@@ -825,6 +897,12 @@ void metadata(std::ostream& os, const Options& options, const cudaDeviceProp& pr
        << ",\"gpu\":\"" << prop.name << "\",\"sm\":" << prop.major * 10 + prop.minor << ",\"gpu_uuid\":\"" << uuid.str()
        << "\",\"driver\":" << driver << ",\"runtime\":" << runtime << ",\"iterations\":" << options.iterations
        << ",\"warmup\":" << options.warmup << ",\"local_backing_count\":true,\"gen_num_per_cycle\":0,\"profiled\":false"
+       << ",\"logical_tokens_per_block\":" << options.cache.logicalTokensPerBlock
+       << ",\"kernel_tokens_per_block\":" << options.cache.kernelTokensPerBlock
+       << ",\"model_num_layers\":" << modelInfo.numLayers << ",\"hidden_size\":" << modelInfo.hiddenSize
+       << ",\"head_num\":" << modelInfo.headNum << ",\"indexer_topk\":" << modelInfo.indexerTopk
+       << ",\"o_groups\":" << modelInfo.oGroups << ",\"kv_cache_sharded\":"
+       << (modelInfo.kvCacheSharded ? "true" : "false")
        << ",\"correctness_only\":" << (options.correctnessOnly ? "true" : "false")
        << ",\"boundary\":\"prebuilt per-API inputs; complete synchronous calls including internal descriptors, checks, locks, metadata H2D, kernels, CPU pack/unpack for staged_no_crc, data transfers, synchronization and CRC verdict\""
        << ",\"production_source\":\"directly linked current workspace CrcBlockCopyBatch and DeviceHostCopyStrategy\""
@@ -832,9 +910,17 @@ void metadata(std::ostream& os, const Options& options, const cudaDeviceProp& pr
        << ",\"copy3d_stream\":\"independent Torch nondefault pooled stream\""
        << ",\"copy3d_submit_mutex\":\"benchmark-local mutex; production private mutex is not exported\""
        << ",\"host_input\":\"independent CPU whole-record oracle prepared outside timing\""
-       << ",\"block_counts\":[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32]"
-       << ",\"seq_size_per_block\":1024,\"kernel_seq_size_per_block\":128"
-       << ",\"cp_size\":1,\"tp_size\":1,\"cp_mode\":\"NONE\""
+       << ",\"block_counts\":[";
+    for (size_t i = 0; i < options.cache.blockCounts.size(); ++i) {
+        if (i)
+            os << ',';
+        os << options.cache.blockCounts[i];
+    }
+    os << "]"
+       << ",\"seq_size_per_block\":" << options.cache.logicalTokensPerBlock
+       << ",\"kernel_seq_size_per_block\":" << options.cache.kernelTokensPerBlock
+       << ",\"cp_size\":" << modelInfo.cpSize << ",\"tp_size\":" << modelInfo.tpSize
+       << ",\"cp_mode\":\"" << modelInfo.cpMode << "\""
        << ",\"h2d_host_payload\":\"recently prepared on CPU once per shared round; host cache is not claimed cold\",\"fallback_allowed\":false}\n";
 }
 
@@ -881,10 +967,10 @@ struct TileProfile {
     std::vector<unsigned char> expected, observed;
     size_t                     stagingBytes;
 
-    TileProfile(Layout layout, size_t l2):
-        w(std::move(layout), l2),
+    TileProfile(Layout layout, size_t l2, size_t maxPayload, size_t maxTiles):
+        w(std::move(layout), l2, maxPayload),
         staging(kMaxBackings * w.stride + 64),
-        descriptors(kMaxBackings * maximumLayoutTiles() * sizeof(CopyTile)),
+        descriptors(kMaxBackings * maxTiles * sizeof(CopyTile)),
         deviceLayers(w.layout.sizes.size() * sizeof(CheckLayer)),
         selectedBlocks(w.poolBlocks),
         errors(sizeof(unsigned int)),
@@ -984,6 +1070,11 @@ struct TileProfile {
 
 int runTileThreadProfile(
     std::ostream& os, const Options& options, const cudaDeviceProp& prop, int driver, int runtime) {
+    const auto modelInfo = dsv4BenchmarkModelInfo(options.cache.model);
+    const auto fullLayout = orderedLayout(true, options.cache);
+    const auto swaLayout = orderedLayout(false, options.cache);
+    const size_t maxPayload = std::max(fullLayout.payload(), swaLayout.payload());
+    const size_t maxTiles = std::max(fullLayout.sizes.size(), swaLayout.sizes.size());
     os << "{\"type\":\"metadata\",\"implementation\":\"tile_copy_thread_profile_v1\",\"seed\":" << options.seed
        << ",\"repeat\":" << options.repeat << ",\"iterations\":" << options.iterations
        << ",\"warmup\":" << options.warmup << ",\"correctness_only\":" << (options.correctnessOnly ? "true" : "false")
@@ -993,13 +1084,18 @@ int runTileThreadProfile(
        << "\",\"sm\":" << prop.major * 10 + prop.minor << ",\"driver\":" << driver << ",\"runtime\":" << runtime
        << ",\"l2_bytes\":" << prop.l2CacheSize << ",\"evict_multiplier\":" << kEvictMultiplier
        << ",\"timing\":\"cuda_event_stream_latency\",\"regime\":\"cold\""
-       << ",\"seq_size_per_block\":1024,\"kernel_seq_size_per_block\":128"
-       << ",\"cp_size\":1,\"tp_size\":1,\"cp_mode\":\"NONE\""
+       << ",\"model\":\"" << modelInfo.name << "\",\"logical_tokens_per_block\":"
+       << options.cache.logicalTokensPerBlock << ",\"kernel_tokens_per_block\":"
+       << options.cache.kernelTokensPerBlock
+       << ",\"seq_size_per_block\":" << options.cache.logicalTokensPerBlock
+       << ",\"kernel_seq_size_per_block\":" << options.cache.kernelTokensPerBlock
+       << ",\"cp_size\":" << modelInfo.cpSize << ",\"tp_size\":" << modelInfo.tpSize
+       << ",\"cp_mode\":\"" << modelInfo.cpMode << "\""
        << ",\"profile_capture\":" << (options.profileCapture ? "true" : "false")
        << ",\"boundary\":\"production launchCopyTiles only between CUDA events; descriptors preuploaded; independent 8xL2 eviction before every candidate outside events; no PCIe payload copy or CRC in interval; event latency may include launch gaps\"}\n";
     std::mt19937 sourceRng(options.seed), orderRng(options.seed ^ 0x728193U);
     for (bool isFull : {true, false}) {
-        TileProfile profile(orderedLayout(isFull), prop.l2CacheSize);
+        TileProfile profile(isFull ? fullLayout : swaLayout, prop.l2CacheSize, maxPayload, maxTiles);
         auto&       w = profile.w;
         os << "{\"type\":\"layout\",\"layout\":\"" << w.layout.name << "\",\"payload_bytes\":" << w.p
            << ",\"tiles\":" << w.layout.sizes.size() << ",\"crc_staging_stride\":" << w.stride
@@ -1075,14 +1171,18 @@ int run(int argc, char** argv) {
                 "CUDA13 runtime, driver and CRC backend are required");
     if (options.tileThreadProfile)
         return runTileThreadProfile(os, options, prop, driver, runtime);
+    const Layout fullLayout = orderedLayout(true, options.cache);
+    const Layout swaLayout = orderedLayout(false, options.cache);
+    const size_t maxPayload = std::max(fullLayout.payload(), swaLayout.payload());
+    const size_t maxTiles = std::max(fullLayout.sizes.size(), swaLayout.sizes.size());
     metadata(os, options, prop, driver, runtime);
     os.flush();
     knownVector();
-    mixedCrcSelfTest<CrcBlockCopyBatch>();
+    mixedCrcSelfTest<CrcBlockCopyBatch>(fullLayout, swaLayout, maxPayload, maxTiles);
     os << "{\"type\":\"mixed_crc_selftest\",\"variant\":\"integrated_crc\",\"success\":true}\n";
     std::mt19937 source_rng(options.seed), order_rng(options.seed ^ 0x728193U);
     for (bool is_full : {true, false}) {
-        Benchmark benchmark(orderedLayout(is_full), prop.l2CacheSize);
+        Benchmark benchmark(is_full ? fullLayout : swaLayout, prop.l2CacheSize, maxPayload, maxTiles);
         auto&     w = benchmark.w;
         os << "{\"type\":\"layout\",\"layout\":\"" << w.layout.name << "\",\"payload_bytes\":" << w.p
            << ",\"encoded_bytes\":" << w.e << ",\"host_stride\":" << w.hostStride << ",\"staging_stride\":" << w.stride
@@ -1106,7 +1206,7 @@ int run(int argc, char** argv) {
            << ",\"guard_check\":\"entire device pool against CPU oracle plus unselected sentinel\"}\n";
         benchmark.restoreDeviceOracle();
         for (bool store : {true, false}) {
-            for (int n = 1; n <= kMaxBackings; ++n) {
+            for (int n : options.cache.blockCounts) {
                 for (int variant = 0; variant < 5; ++variant) {
                     if (!store && variant == 1 && options.exclude1dH2d) {
                         os << "{\"type\":\"excluded_correctness\",\"direction\":\"h2d\",\"layout\":\"" << w.layout.name
@@ -1134,7 +1234,7 @@ int run(int argc, char** argv) {
         if (options.correctnessOnly)
             continue;
         for (bool store : {true, false}) {
-            for (int n = 1; n <= kMaxBackings; ++n) {
+            for (int n : options.cache.blockCounts) {
                 std::vector<int> sources(w.rotationCount(n));
                 std::iota(sources.begin(), sources.end(), 0);
                 std::shuffle(sources.begin(), sources.end(), source_rng);

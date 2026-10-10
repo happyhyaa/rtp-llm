@@ -31,11 +31,26 @@ struct Layout {
     std::string                   geometryJson() const;
 };
 
+struct Dsv4BenchmarkModelInfo {
+    std::string name;
+    uint32_t    numLayers;
+    uint32_t    hiddenSize;
+    uint32_t    headNum;
+    uint32_t    indexerTopk;
+    uint32_t    oGroups;
+    uint32_t    tpSize;
+    uint32_t    cpSize;
+    bool        kvCacheSharded;
+    std::string cpMode;
+};
+
 // Resolve model specs through main's CacheConfigCreator and physical pool
 // helper. These functions describe one local, prefix-reusable backing.
-const Layout& deepSeekV4FlashLayout(bool full);
-size_t        maximumLayoutTiles();
-size_t        maximumLayoutPayload();
+Dsv4BenchmarkModelInfo dsv4BenchmarkModelInfo(const std::string& model);
+Layout                 deepSeekV4Layout(const std::string& model,
+                                         uint32_t           logicalTokensPerBlock,
+                                         uint32_t           kernelTokensPerBlock,
+                                         bool               full);
 
 // Owns the actual production DeviceHostCopyPlan values without exposing their
 // transitive framework/Torch dependencies to the CUDA translation unit.

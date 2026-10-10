@@ -24,35 +24,41 @@ void requireDone(const StrategyResult& result, const char* name) {
     }
 }
 
-CacheConfig flashCacheConfig() {
+CacheConfig dsv4CacheConfig(const std::string& modelName,
+                            uint32_t           logicalTokensPerBlock,
+                            uint32_t           kernelTokensPerBlock) {
+    const bool isPro = modelName == "pro";
+    if (!isPro && modelName != "flash")
+        throw std::invalid_argument("model must be 'pro' or 'flash'");
+
     ModelConfig model;
-    model.num_layers                          = 43;
-    model.hidden_size                         = 4096;
-    model.attn_config.head_num                = 64;
+    model.num_layers                          = isPro ? 61 : 43;
+    model.hidden_size                         = isPro ? 7168 : 4096;
+    model.attn_config.head_num                = isPro ? 128 : 64;
     model.attn_config.kv_head_num             = 1;
     model.attn_config.size_per_head           = 512;
     model.attn_config.rope_head_dim           = 64;
     model.attn_config.sliding_window          = 128;
     model.attn_config.indexer_head_dim        = 128;
     model.attn_config.indexer_head_num        = 64;
-    model.attn_config.indexer_topk            = 512;
-    model.attn_config.o_groups                = 8;
+    model.attn_config.indexer_topk            = isPro ? 1024 : 512;
+    model.attn_config.o_groups                = isPro ? 16 : 8;
     model.attn_config.o_lora_rank             = 1024;
-    model.attn_config.tokens_per_block        = 1024;
-    model.attn_config.kernel_tokens_per_block = 128;
+    model.attn_config.tokens_per_block        = logicalTokensPerBlock;
+    model.attn_config.kernel_tokens_per_block = kernelTokensPerBlock;
     model.attn_config.kv_cache_dtype          = KvCacheDataType::FP8;
-    model.attn_config.layer_compress_ratios   = {0, 0};
-    for (int layer = 2; layer < 43; ++layer)
+    model.attn_config.layer_compress_ratios   = isPro ? std::vector<int>{128, 128} : std::vector<int>{0, 0};
+    for (int layer = 2; layer < model.num_layers; ++layer)
         model.attn_config.layer_compress_ratios.push_back(layer % 2 == 0 ? 4 : 128);
     model.hybrid_attention_config.enable_hybrid_attention = true;
     test::setDsv4KvCacheSpecs(model, model.attn_config.layer_compress_ratios);
 
     ParallelismConfig parallel;
     parallel.role_type                          = RoleType::PREFILL;
-    parallel.tp_size                            = 1;
-    parallel.world_size                         = 1;
-    parallel.prefill_cp_config.kv_cache_sharded = false;
-    parallel.prefill_cp_config.prefill_cp_size  = 1;
+    parallel.tp_size                            = isPro ? 8 : 1;
+    parallel.world_size                         = parallel.tp_size;
+    parallel.prefill_cp_config.kv_cache_sharded = isPro;
+    parallel.prefill_cp_config.prefill_cp_size  = isPro ? 8 : 1;
     return CacheConfigCreator::createWarmupConfig(model, parallel, /*gen_num_per_cycle=*/0);
 }
 
@@ -126,19 +132,20 @@ std::string Layout::geometryJson() const {
     return os.str();
 }
 
-const Layout& deepSeekV4FlashLayout(bool full) {
-    static const auto config      = flashCacheConfig();
-    static const auto full_layout = deriveLayout(config, true);
-    static const auto swa_layout  = deriveLayout(config, false);
-    return full ? full_layout : swa_layout;
+Dsv4BenchmarkModelInfo dsv4BenchmarkModelInfo(const std::string& model) {
+    if (model == "pro")
+        return {"pro", 61, 7168, 128, 1024, 16, 8, 8, true, "CP_RR"};
+    if (model == "flash")
+        return {"flash", 43, 4096, 64, 512, 8, 1, 1, false, "NONE"};
+    throw std::invalid_argument("model must be 'pro' or 'flash'");
 }
 
-size_t maximumLayoutTiles() {
-    return std::max(deepSeekV4FlashLayout(true).sizes.size(), deepSeekV4FlashLayout(false).sizes.size());
-}
-
-size_t maximumLayoutPayload() {
-    return std::max(deepSeekV4FlashLayout(true).payload(), deepSeekV4FlashLayout(false).payload());
+Layout deepSeekV4Layout(const std::string& model,
+                        uint32_t           logicalTokensPerBlock,
+                        uint32_t           kernelTokensPerBlock,
+                        bool               full) {
+    const auto config = dsv4CacheConfig(model, logicalTokensPerBlock, kernelTokensPerBlock);
+    return deriveLayout(config, full);
 }
 
 struct FrameworkCopyPlan::Impl {

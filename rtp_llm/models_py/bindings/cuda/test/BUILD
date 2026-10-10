@@ -103,6 +103,7 @@ cc_binary(
 py_test(
     name = "crc_copy_benchmark_test",
     srcs = [
+        "crc_copy_benchmark_config.py",
         "crc_copy_benchmark_stats.py",
         "run_crc_copy_benchmark.py",
     ],
@@ -118,6 +119,7 @@ py_test(
 py_test(
     name = "crc_copy_benchmark_stats_test",
     srcs = [
+        "crc_copy_benchmark_config.py",
         "crc_copy_benchmark_stats.py",
         "crc_copy_benchmark_stats_test.py",
     ],
@@ -147,6 +149,7 @@ cc_test(
 py_test(
     name = "tile_copy_thread_profile_test",
     srcs = [
+        "crc_copy_benchmark_config.py",
         "crc_copy_benchmark_stats.py",
         "run_crc_copy_benchmark.py",
         "run_tile_copy_thread_profile.py",
@@ -163,6 +166,7 @@ py_test(
 py_test(
     name = "tile_copy_thread_profile_stats_test",
     srcs = [
+        "crc_copy_benchmark_config.py",
         "crc_copy_benchmark_stats.py",
         "run_crc_copy_benchmark.py",
         "run_tile_copy_thread_profile.py",

@@ -10,6 +10,8 @@ import re
 import statistics
 from pathlib import Path
 
+from crc_copy_benchmark_config import MAX_BACKINGS, model_profile, resolve_benchmark_config
+
 VARIANTS = (
     "integrated_crc",
     "copy1d_batch",
@@ -18,46 +20,106 @@ VARIANTS = (
     "gather_control",
 )
 DIRECTIONS = ("d2h", "h2d")
-BLOCKS = tuple(range(1, 33))
-# Independent shape oracle for the pinned Flash TP1/CP1 configuration. The executable
-# obtains its tile geometry from CacheConfigCreator, not from this table.
-FLASH_RATIO4_LAYERS = list(range(2, 43, 2))
-FLASH_RATIO128_LAYERS = list(range(3, 43, 2))
-FLASH_LOGICAL_TO_KERNEL_BLOCKS = 1024 // 128
-GROUPS = {
-    "full": [
-        ("csa_kv", 19008 * FLASH_LOGICAL_TO_KERNEL_BLOCKS, FLASH_RATIO4_LAYERS),
-        ("indexer_kv", 4224 * FLASH_LOGICAL_TO_KERNEL_BLOCKS, FLASH_RATIO4_LAYERS),
-        ("hca_kv", 1152 * FLASH_LOGICAL_TO_KERNEL_BLOCKS, FLASH_RATIO128_LAYERS),
-    ],
-    "swa": [
-        ("swa_kv", 74880 * FLASH_LOGICAL_TO_KERNEL_BLOCKS, list(range(43))),
-        ("indexer_state", 16384 * FLASH_LOGICAL_TO_KERNEL_BLOCKS, FLASH_RATIO4_LAYERS),
-        ("csa_state", 65536 * FLASH_LOGICAL_TO_KERNEL_BLOCKS, FLASH_RATIO4_LAYERS),
-    ],
-}
-TILES = {
-    layout: [width for _, width, layers in groups for _ in layers]
-    for layout, groups in GROUPS.items()
-}
+BLOCKS = tuple(range(1, MAX_BACKINGS + 1))
 
 
-def expected_geometry(layout):
-    result, offset = [], 0
-    for member, (tag, width, layers) in enumerate(GROUPS[layout]):
-        for local_layer, model_layer in enumerate(layers):
-            result.append(
-                dict(
-                    tag=tag,
-                    member=member,
-                    local_layer=local_layer,
-                    model_layer=model_layer,
-                    bytes=width,
-                    offset_per_pool_block=offset,
+def _align(value, alignment):
+    return (value + alignment - 1) // alignment * alignment
+
+
+def _profile_groups(model, layout):
+    profile = model_profile(model)
+    tags_by_ratio = {
+        4: ("csa_kv", "indexer_kv", "indexer_state", "csa_state", "swa_kv"),
+        128: ("hca_kv", "hca_state", "swa_kv"),
+        0: ("swa_kv",),
+    }
+    selected_tags = (
+        {"csa_kv", "indexer_kv", "hca_kv"}
+        if layout == "full"
+        else {"swa_kv", "indexer_state", "csa_state"}
+    )
+    order = []
+    for ratio in profile.ratios:
+        for tag in tags_by_ratio[ratio]:
+            if tag in selected_tags and tag not in order:
+                order.append(tag)
+    layer_ids = {
+        "csa_kv": [i for i, ratio in enumerate(profile.ratios) if ratio == 4],
+        "indexer_kv": [i for i, ratio in enumerate(profile.ratios) if ratio == 4],
+        "hca_kv": [i for i, ratio in enumerate(profile.ratios) if ratio == 128],
+        "swa_kv": list(range(profile.num_layers)),
+        "indexer_state": [i for i, ratio in enumerate(profile.ratios) if ratio == 4],
+        "csa_state": [i for i, ratio in enumerate(profile.ratios) if ratio == 4],
+    }
+    return profile, order, layer_ids
+
+
+def expected_layout(model, logical_tokens_per_block, kernel_tokens_per_block):
+    config = resolve_benchmark_config(
+        model, logical_tokens_per_block, kernel_tokens_per_block, (1,)
+    )
+    profile = config["profile"]
+    logical = config["logical_tokens_per_block"]
+    kernel = config["kernel_tokens_per_block"]
+    pages_per_logical = logical // kernel
+    cp = profile.cp_size
+
+    widths = {
+        "csa_kv": _align((kernel // 4) * 584, 576) * pages_per_logical,
+        "indexer_kv": (kernel // 4) * 132 * pages_per_logical,
+        "hca_kv": _align((kernel // 128) * 584, 576) * pages_per_logical,
+        "swa_kv": _align(128 * 584, 576) // cp,
+        "indexer_state": (8 // cp if cp > 1 else 8) * 128 * 4 * 4,
+        "csa_state": (8 // cp if cp > 1 else 8) * 512 * 4 * 4,
+    }
+    result = {}
+    for layout in ("full", "swa"):
+        _, order, layer_ids = _profile_groups(model, layout)
+        geometry, tile_bytes, offsets = [], [], []
+        offset = 0
+        for member, tag in enumerate(order):
+            for local_layer, model_layer in enumerate(layer_ids[tag]):
+                width = widths[tag]
+                geometry.append(
+                    dict(
+                        tag=tag,
+                        member=member,
+                        local_layer=local_layer,
+                        model_layer=model_layer,
+                        bytes=width,
+                        offset_per_pool_block=offset,
+                    )
                 )
-            )
-            offset += width
+                tile_bytes.append(width)
+                offsets.append(offset)
+                offset += width
+        result[layout] = {
+            "tile_bytes": tile_bytes,
+            "geometry": geometry,
+            "offsets": offsets,
+            "tiles": len(tile_bytes),
+            "payload_bytes": sum(tile_bytes),
+        }
+
+    max_payload = max(shape["payload_bytes"] for shape in result.values())
+    for shape in result.values():
+        payload = shape["payload_bytes"]
+        encoded = _align(payload + 4, 16)
+        shape.update(
+            reserved_sentinel_blocks=1,
+            encoded_bytes=encoded,
+            host_stride=_align(encoded, 4096),
+            staging_stride=_align(max_payload + 4, 16),
+            host_pinned_verified=True,
+            source_device_verified=True,
+            copy3d_operations_per_backing=len(order),
+        )
     return result
+
+
+def expected_geometry(layout, model="flash", logical_tokens_per_block=1024, kernel_tokens_per_block=128):
+    return expected_layout(model, logical_tokens_per_block, kernel_tokens_per_block)[layout]["geometry"]
 
 
 def require(condition, message):
@@ -79,9 +141,9 @@ def exact(actual, expected):
     return actual == expected
 
 
-def case_key(record):
+def case_key(record, blocks=BLOCKS):
     require(
-        type(record["blocks"]) is int and record["blocks"] in BLOCKS,
+        type(record["blocks"]) is int and record["blocks"] in blocks,
         "Invalid backing count",
     )
     return record["direction"], record["layout"], record["blocks"], record["variant"]
@@ -105,10 +167,26 @@ def read_run(path, settings, repeat):
     )
     meta = records[0]
     exclude = settings["exclude_1d_h2d"]
+    config = resolve_benchmark_config(
+        settings["model"],
+        settings["logical_tokens_per_block"],
+        settings["kernel_tokens_per_block"],
+        settings["block_counts"],
+    )
+    profile = config["profile"]
+    blocks = list(config["block_counts"])
+    shapes = expected_layout(
+        config["model"],
+        config["logical_tokens_per_block"],
+        config["kernel_tokens_per_block"],
+    )
     expected_meta = {
         "implementation": "crc_copy_benchmark_v2",
         "variants": list(VARIANTS),
-        "block_counts": list(BLOCKS),
+        "model": config["model"],
+        "block_counts": blocks,
+        "logical_tokens_per_block": config["logical_tokens_per_block"],
+        "kernel_tokens_per_block": config["kernel_tokens_per_block"],
         "repeat": repeat,
         "seed": settings["seed"] + repeat,
         "iterations": settings["iterations"],
@@ -122,11 +200,17 @@ def read_run(path, settings, repeat):
         "layout_order": "production",
         "shape_source": "CacheConfigCreator+DeviceBlockPoolConfigHelper",
         "local_backing_count": True,
-        "seq_size_per_block": 1024,
-        "kernel_seq_size_per_block": 128,
-        "cp_size": 1,
-        "tp_size": 1,
-        "cp_mode": "NONE",
+        "seq_size_per_block": config["logical_tokens_per_block"],
+        "kernel_seq_size_per_block": config["kernel_tokens_per_block"],
+        "model_num_layers": profile.num_layers,
+        "hidden_size": profile.hidden_size,
+        "head_num": profile.head_num,
+        "indexer_topk": profile.indexer_topk,
+        "o_groups": profile.o_groups,
+        "cp_size": profile.cp_size,
+        "tp_size": profile.tp_size,
+        "cp_mode": profile.cp_mode,
+        "kv_cache_sharded": profile.kv_cache_sharded,
         "gen_num_per_cycle": 0,
         "fallback_allowed": False,
     }
@@ -178,8 +262,8 @@ def read_run(path, settings, repeat):
     matrix = {
         (d, layout, n, v)
         for d in DIRECTIONS
-        for layout in TILES
-        for n in BLOCKS
+        for layout in shapes
+        for n in blocks
         for v in active_variants(d, exclude)
     }
     rounds = 0 if settings["correctness_only"] else settings["iterations"]
@@ -194,29 +278,17 @@ def read_run(path, settings, repeat):
     if rounds:
         expected_counts["sample"] = len(matrix) * rounds
     if exclude:
-        expected_counts["excluded_correctness"] = 64
+        expected_counts["excluded_correctness"] = 2 * len(blocks)
     counts = collections.Counter(r["type"] for r in records)
     require(counts == collections.Counter(expected_counts), f"Record counts: {counts}")
     layouts = {r["layout"]: r for r in records if r["type"] == "layout"}
-    require(set(layouts) == set(TILES), "Layout coverage")
-    for layout, tiles in TILES.items():
+    require(set(layouts) == set(shapes), "Layout coverage")
+    for layout, expected in shapes.items():
         shape = layouts[layout]
-        payload = sum(tiles)
-        encoded = (payload + 19) // 16 * 16
-        expected = {
-            "tile_bytes": tiles,
-            "geometry": expected_geometry(layout),
-            "reserved_sentinel_blocks": 1,
-            "tiles": len(tiles),
-            "payload_bytes": payload,
-            "encoded_bytes": encoded,
-            "host_stride": (encoded + 4095) // 4096 * 4096,
-            "staging_stride": 39521296,
-            "host_pinned_verified": True,
-            "source_device_verified": True,
-            "copy3d_operations_per_backing": 3,
-        }
+        payload = expected["payload_bytes"]
         for key, value in expected.items():
+            if key == "offsets":
+                continue
             require(exact(shape.get(key), value), f"Invalid {layout} shape: {key}")
         for key in ("source_bytes", "destination_bytes", "pool_blocks", "evict_bytes"):
             require(
@@ -239,7 +311,7 @@ def read_run(path, settings, repeat):
             "Pool/eviction buffer smaller than 8x L2",
         )
     checks = [r for r in records if r["type"] == "correctness"]
-    key = case_key
+    key = lambda record: case_key(record, blocks)
     require(
         collections.Counter(map(key, checks)) == collections.Counter(matrix),
         "Correctness matrix",
@@ -251,7 +323,7 @@ def read_run(path, settings, repeat):
         )
     excluded = [r for r in records if r["type"] == "excluded_correctness"]
     excluded_matrix = (
-        {("h2d", layout, n, "copy1d_batch") for layout in TILES for n in BLOCKS}
+        {("h2d", layout, n, "copy1d_batch") for layout in shapes for n in blocks}
         if exclude
         else set()
     )
@@ -281,7 +353,7 @@ def read_run(path, settings, repeat):
     corruption = [r for r in records if r["type"] == "crc_corruption"]
     require(
         collections.Counter((r["layout"], r["blocks"]) for r in corruption)
-        == collections.Counter(itertools.product(TILES, (1, 8, 16, 32))),
+        == collections.Counter(itertools.product(shapes, (1, 8, 16, 32))),
         "Corruption matrix",
     )
     for record in corruption:
@@ -349,7 +421,7 @@ def read_run(path, settings, repeat):
         require(record["variant"] not in pairs[pair], "Duplicate sample")
         pairs[pair][record["variant"]] = record
     require(
-        set(pairs) == set(itertools.product(DIRECTIONS, TILES, BLOCKS, range(rounds))),
+        set(pairs) == set(itertools.product(DIRECTIONS, shapes, blocks, range(rounds))),
         "Missing sample round",
     )
     for pair, values in pairs.items():
@@ -382,6 +454,11 @@ def summarize(values):
 def analyze(paths, settings):
     require(len(paths) == 2, "Exactly two process repeats required")
     inputs, cases, warnings = [], collections.defaultdict(list), []
+    shapes = expected_layout(
+        settings["model"],
+        settings["logical_tokens_per_block"],
+        settings["kernel_tokens_per_block"],
+    )
     for repeat, path in zip((80, 81), paths):
         meta, pairs = read_run(path, settings, repeat)
         inputs.append(
@@ -405,6 +482,13 @@ def analyze(paths, settings):
         "binary_sha256",
         "shape_source",
         "staged_no_crc_source",
+        "model",
+        "logical_tokens_per_block",
+        "kernel_tokens_per_block",
+        "block_counts",
+        "tp_size",
+        "cp_size",
+        "cp_mode",
     ):
         require(
             inputs[0]["metadata"][key] == inputs[1]["metadata"][key],
@@ -416,6 +500,7 @@ def analyze(paths, settings):
             "direction": direction,
             "layout": layout,
             "blocks": n,
+            "payload_bytes": shapes[layout]["payload_bytes"],
             "variants": {},
             "comparisons": {},
         }
@@ -484,7 +569,7 @@ def analyze(paths, settings):
                         }
                     )
             stats["payload_GBps_at_p50"] = (
-                n * sum(TILES[layout]) / stats["p50_us"] / 1000
+                n * case["payload_bytes"] / stats["p50_us"] / 1000
             )
             case["variants"][variant] = stats
         for baseline in case["variants"]:
@@ -528,7 +613,10 @@ def write_results(result, output):
     lines = [
         f"Source: `{meta['source_commit']}`; main base: `{meta['base_commit']}`.",
         f"GPU: {meta['gpu']} (SM{meta['sm']}); CUDA runtime: {meta['runtime']}.",
-        "DeepSeek V4 Flash FP8, TP1/CP1; logical tokens/block=1024, kernel tokens/block=128, gen_num_per_cycle=0.",
+        f"DeepSeek V4 {meta['model'].title()} FP8, TP{meta['tp_size']}/CP{meta['cp_size']}; "
+        f"logical tokens/block={meta['logical_tokens_per_block']}, "
+        f"kernel tokens/block={meta['kernel_tokens_per_block']}, BS={','.join(map(str, meta['block_counts']))}, "
+        "gen_num_per_cycle=0.",
         "",
         "Complete synchronous call latency, p50 / p95 (us).",
         "",
