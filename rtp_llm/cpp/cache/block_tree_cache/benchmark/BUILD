@@ -1,9 +1,40 @@
-load("//:def.bzl", "copts")
+load("//:def.bzl", "copts", "cuda_copts")
+load("@arch_config//:arch_select.bzl", "torch_deps")
 
 CUDA_ONLY = select({
     "@//:using_cuda": [],
     "//conditions:default": ["@platforms//:incompatible"],
 })
+
+cc_binary(
+    name = "dual_3d_copy_benchmark",
+    testonly = True,
+    target_compatible_with = CUDA_ONLY,
+    srcs = ["Dual3DCopyBenchmark.cu"],
+    copts = cuda_copts() + ["-O3"],
+    tags = ["manual"],
+    deps = [
+        "//rtp_llm/cpp/cache:cache_config",
+        "//rtp_llm/cpp/cache:cache_core",
+        "//rtp_llm/cpp/cache:device_block_pool_config_helper",
+        "//rtp_llm/cpp/cache/block_tree_cache",
+        "//rtp_llm/cpp/cache/test:cache_config_test_utils",
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ] + torch_deps(),
+)
+
+py_test(
+    name = "dual_3d_copy_benchmark_smoke_test",
+    srcs = ["dual_3d_copy_benchmark_smoke_test.py"],
+    main = "dual_3d_copy_benchmark_smoke_test.py",
+    data = [":dual_3d_copy_benchmark"],
+    args = ["--binary=$(location :dual_3d_copy_benchmark)"],
+    size = "large",
+    timeout = "long",
+    tags = ["manual", "gpu", "local", "exclusive", "no-remote"],
+    target_compatible_with = CUDA_ONLY,
+)
 
 cc_library(
     name = "transfer_benchmark_workload",
