@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <mutex>
 #include <torch/torch.h>
 #include <vector>
 
@@ -79,6 +80,7 @@ void execNoBlockCopy(const MultiCopyParams& params);
 // Only NOT_SUPPORTED permits the caller to fall back to another strategy;
 // EXECUTION_FAILED means a CUDA call was attempted and failed.
 BatchedMemoryCopyStatus execBatchedMemoryCopy(const BatchedMemoryCopyParams& params);
+std::mutex&             cudaBatchSubmitMutex(int device_index);
 
 // Stages compact host payload in GPU memory, then uses one SM gather/scatter kernel.
 // host_segments may describe non-contiguous host blocks; each segment copies directly to/from GPU staging.
