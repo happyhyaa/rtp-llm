@@ -61,6 +61,9 @@ public:
 
 class Cuda3DBatchDeviceHostCopyStrategy: public DeviceHostCopyStrategy {
 public:
+    explicit Cuda3DBatchDeviceHostCopyStrategy(const std::vector<std::shared_ptr<GroupSet>>& group_sets = {},
+                                               bool                                          enabled    = true);
+
     // The template path consumes the original batch, never a tile plan.
     StrategyResult tryExecute(const DeviceHostCopyPlan&, const DeviceHostCopyOptions&) override {
         return StrategyResult::notApplicable();
@@ -68,6 +71,10 @@ public:
     virtual StrategyResult tryExecute(const std::vector<HostBufferView>&     hosts,
                                       const std::vector<TransferDescriptor>& descriptors,
                                       const std::vector<const GroupSet*>&    group_sets);
+
+private:
+    static std::vector<DeviceHostCopyTemplate>                     initializeCopy3DTemplates(const GroupSet& group);
+    std::map<const GroupSet*, std::vector<DeviceHostCopyTemplate>> templates_;
 };
 
 class StagedSmDeviceHostCopyStrategy: public DeviceHostCopyStrategy {

@@ -327,13 +327,6 @@ static void installStrategyRecorders(DeviceHostTransferExecutor& executor, std::
     }
 }
 
-TEST(DeviceHostTransferExecutorConfigTest, IncludesTemplateStrategyBeforeLegacyFallbacks) {
-    ScopedCopyPriorityEnv      priority(nullptr);
-    BlockTreeTaskPool          task_pool(1, 8, "TemplateStrategyConfigTest");
-    DeviceHostTransferExecutor executor(task_pool, 8);
-    EXPECT_EQ(executor.strategies_.size(), 4u);
-}
-
 TEST(DeviceHostTransferExecutorConfigTest, PrefersCuda3DBatchThenCudaBatchThenStagedSmThenGeneric) {
     ScopedCopyPriorityEnv      priority(nullptr);
     BlockTreeTaskPool          task_pool(1, 8, "DeviceHostExecutorConfigTest");

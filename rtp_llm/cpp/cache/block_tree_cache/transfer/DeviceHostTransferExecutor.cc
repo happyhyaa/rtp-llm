@@ -40,11 +40,13 @@ DeviceHostTransferExecutor::DeviceHostTransferExecutor(BlockTreeTaskPool&    tra
                                                        DeviceHostCopyOptions options,
                                                        std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter,
                                                        std::shared_ptr<CrcTransferService>            crc_service,
-                                                       BlockTreeTaskPool*                             load_task_pool):
+                                                       BlockTreeTaskPool*                             load_task_pool,
+                                                       const std::vector<GroupSetPtr>&                group_sets):
     TransferExecutor(transfer_task_pool, max_descriptors_per_batch, std::move(metrics_reporter), load_task_pool),
     crc_service_(std::move(crc_service)),
     options_(std::move(options)) {
-    strategies_.push_back(std::make_unique<Cuda3DBatchDeviceHostCopyStrategy>());
+    strategies_.push_back(
+        std::make_unique<Cuda3DBatchDeviceHostCopyStrategy>(group_sets, options_.cuda_3d_batch_copy_enabled));
     strategies_.push_back(std::make_unique<CudaBatchDeviceHostCopyStrategy>());
     strategies_.push_back(std::make_unique<StagedSmDeviceHostCopyStrategy>());
     strategies_.push_back(std::make_unique<GenericMultiCopyDeviceHostCopyStrategy>());

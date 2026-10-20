@@ -79,7 +79,9 @@ private:
 
 class RecordingCuda3DBatchDeviceHostCopyStrategy final: public Cuda3DBatchDeviceHostCopyStrategy {
 public:
-    explicit RecordingCuda3DBatchDeviceHostCopyStrategy(BenchmarkDeviceHostCopyStats* stats): stats_(stats) {}
+    RecordingCuda3DBatchDeviceHostCopyStrategy(Cuda3DBatchDeviceHostCopyStrategy&& strategy,
+                                               BenchmarkDeviceHostCopyStats*       stats):
+        Cuda3DBatchDeviceHostCopyStrategy(std::move(strategy)), stats_(stats) {}
 
     StrategyResult tryExecute(const std::vector<HostBufferView>&     hosts,
                               const std::vector<TransferDescriptor>& descriptors,
@@ -103,8 +105,8 @@ void installStrategyRecorders(PerRankBlockTransferEngine&                       
                               const std::shared_ptr<BenchmarkDeviceHostCopyStats>& stats) {
     auto& strategies = engine.device_host_executor_->strategies_;
     for (auto& strategy : strategies) {
-        if (dynamic_cast<Cuda3DBatchDeviceHostCopyStrategy*>(strategy.get()) != nullptr) {
-            strategy = std::make_unique<RecordingCuda3DBatchDeviceHostCopyStrategy>(stats.get());
+        if (auto* copy3d = dynamic_cast<Cuda3DBatchDeviceHostCopyStrategy*>(strategy.get())) {
+            strategy = std::make_unique<RecordingCuda3DBatchDeviceHostCopyStrategy>(std::move(*copy3d), stats.get());
             continue;
         }
         std::atomic<size_t>* completed = nullptr;

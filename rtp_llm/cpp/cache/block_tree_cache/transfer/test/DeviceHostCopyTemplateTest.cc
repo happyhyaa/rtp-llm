@@ -2,11 +2,13 @@
 #include <cuda_runtime.h>
 #include <algorithm>
 #include <functional>
+#include <tuple>
 #include <c10/cuda/CUDAGuard.h>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/FullGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/DeviceHostTransferExecutor.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/test/PerRankBlockTransferEngineTestUtils.h"
+#include "rtp_llm/models_py/bindings/NoBlockCopy.h"
 
 namespace rtp_llm {
 namespace {
@@ -47,8 +49,8 @@ TEST(DeviceHostCopyTemplateTest, CoversEveryLegacyTileForFullAndSwa) {
     BlockTreeTaskPool          tasks(1, 8, "TemplateTest");
     DeviceHostTransferExecutor executor(tasks, 8);
     for (auto type : {CacheGroupType::FULL, CacheGroupType::SWA}) {
-        auto        group     = templateGroup(type);
-        const auto& templates = group->copy3DTemplates();
+        auto       group     = templateGroup(type);
+        const auto templates = Cuda3DBatchDeviceHostCopyStrategy::initializeCopy3DTemplates(*group);
         ASSERT_EQ(templates.size(), 3u);
         EXPECT_EQ(templates[0].host_offset, 0u);
         EXPECT_EQ(templates[1].host_offset, 8u);
@@ -82,44 +84,179 @@ TEST(DeviceHostCopyTemplateTest, CoversEveryLegacyTileForFullAndSwa) {
     }
 }
 
-TEST(DeviceHostCopyTemplateTest, ReusesTemplatesUntilTopologyChanges) {
-    auto        group     = templateGroup(CacheGroupType::FULL);
-    const auto* templates = group->copy3DTemplates().data();
-    group->initialize(group->groupSetId(), group->topologyPtr(), group->groupTags());
-    EXPECT_EQ(group->copy3DTemplates().data(), templates);
-    auto prefix = makeTestTopology({makeTestGroupBase(defaultCacheGroupPolicy(CacheGroupType::FULL), {0, 1}, 2),
-                                    makeTestGroupBase(defaultCacheGroupPolicy(CacheGroupType::FULL), {0, 1, 2}, 8),
-                                    makeTestGroupBase(defaultCacheGroupPolicy(CacheGroupType::FULL), {0}, 16)});
-    group->initialize(0, prefix, {"group0", "group1", "group2"});
-    EXPECT_TRUE(group->copy3DTemplates().empty());
+TEST(DeviceHostCopyTemplateTest, Disabled3DBatchDoesNotInitializeTemplates) {
+    auto                  group = templateGroup(CacheGroupType::FULL);
+    BlockTreeTaskPool     tasks(1, 8, "DisabledTemplateInitTest");
+    DeviceHostCopyOptions options;
+    options.cuda_3d_batch_copy_enabled = false;
+    DeviceHostTransferExecutor executor(tasks, 8, options, nullptr, nullptr, nullptr, {group});
+    auto* strategy = dynamic_cast<Cuda3DBatchDeviceHostCopyStrategy*>(executor.strategies_.front().get());
+    ASSERT_NE(strategy, nullptr);
+    EXPECT_TRUE(strategy->templates_.empty());
 }
 
-TEST(DeviceHostCopyTemplateTest, RejectsWidthMismatchAndIndependentScaleTemplates) {
-    auto pool  = regularPool(16, 2);
+TEST(DeviceHostCopyTemplateTest, RejectsOversizedWidthAndIndependentScaleTemplates) {
+    auto pool  = regularPool(8, 2);
     auto group = makeTestGroupSet(
         0,
-        makeTestTopology({makeTestGroupBase(defaultCacheGroupPolicy(CacheGroupType::FULL), {0, 1}, 8)}),
+        makeTestTopology({makeTestGroupBase(defaultCacheGroupPolicy(CacheGroupType::FULL), {0, 1}, 16)}),
         {"group0"},
         {pool});
-    EXPECT_TRUE(group->copy3DTemplates().empty());
+    EXPECT_TRUE(Cuda3DBatchDeviceHostCopyStrategy::initializeCopy3DTemplates(*group).empty());
     auto scale_pool = makeTestDevicePool({{16, 4}}, 4, "scale-fallback");
     auto scaled     = makeTestGroupSet(
         0,
         makeTestTopology({makeTestGroupBase(defaultCacheGroupPolicy(CacheGroupType::FULL), {0}, 16, 4)}),
         {"group0"},
         {scale_pool});
-    EXPECT_TRUE(scaled->copy3DTemplates().empty());
+    EXPECT_TRUE(Cuda3DBatchDeviceHostCopyStrategy::initializeCopy3DTemplates(*scaled).empty());
 }
 
-TEST(DeviceHostCopyTemplateTest, ReinitializationUpdatesCrcBackingLayout) {
+TEST(DeviceHostCopyTemplateTest, SupportsLogicalWidthBelowDeviceStride) {
+    auto pool  = regularPool(128, 2);
+    auto group = makeTestGroupSet(
+        0,
+        makeTestTopology({makeTestGroupBase(defaultCacheGroupPolicy(CacheGroupType::FULL), {0, 1}, 100)}),
+        {"group0"},
+        {pool});
+    const auto templates = Cuda3DBatchDeviceHostCopyStrategy::initializeCopy3DTemplates(*group);
+    ASSERT_EQ(templates.size(), 1u);
+    EXPECT_EQ(templates[0].width_bytes, 100u);
+    EXPECT_EQ(templates[0].device_block_stride, 128u);
+    EXPECT_EQ(templates[0].device_pitch, 640u);
+    EXPECT_EQ(templates[0].layer_count, 2u);
+    EXPECT_EQ(group->payloadBytes(), 200u);
+}
+
+TEST(DeviceHostCopyTemplateTest, PhysicalPayloadKeepsCompleteDeviceBlocks) {
+    auto pool  = regularPool(128, 2);
+    auto group = makeTestGroupSet(
+        0,
+        makeTestTopology({makeTestGroupBase(defaultCacheGroupPolicy(CacheGroupType::FULL), {0, 1}, 100)}),
+        {"group0"},
+        {pool},
+        nullptr,
+        nullptr,
+        false,
+        256);
+    const auto templates = Cuda3DBatchDeviceHostCopyStrategy::initializeCopy3DTemplates(*group);
+    ASSERT_EQ(templates.size(), 1u);
+    EXPECT_EQ(templates[0].width_bytes, 128u);
+    EXPECT_EQ(templates[0].device_block_stride, 128u);
+    EXPECT_EQ(templates[0].device_pitch, 640u);
+    EXPECT_EQ(group->payloadBytes(), 256u);
+}
+
+TEST(DeviceHostCopyTemplateTest, RejectsIncompleteLayersAndPayloadGeometry) {
+    auto pool = regularPool(16, 2);
+    for (const auto& layers : {std::vector<int>{0}, std::vector<int>{0, 1, 2}}) {
+        auto group = makeTestGroupSet(
+            0,
+            makeTestTopology({makeTestGroupBase(defaultCacheGroupPolicy(CacheGroupType::FULL), layers, 16)}),
+            {"group0"},
+            {pool});
+        EXPECT_TRUE(Cuda3DBatchDeviceHostCopyStrategy::initializeCopy3DTemplates(*group).empty());
+    }
+    auto group = makeTestGroupSet(
+        0,
+        makeTestTopology({makeTestGroupBase(defaultCacheGroupPolicy(CacheGroupType::FULL), {0, 1}, 16)}),
+        {"group0"},
+        {pool});
+    group->initialize(0, group->topologyPtr(), group->groupTags(), BackingLayout{48, 48, 48, false});
+    EXPECT_TRUE(Cuda3DBatchDeviceHostCopyStrategy::initializeCopy3DTemplates(*group).empty());
+}
+
+TEST(DeviceHostCopyTemplateTest, CrcBackingsDoNotBuildPlain3DTemplates) {
     auto group = templateGroup(CacheGroupType::FULL);
     group->initialize(0, group->topologyPtr(), group->groupTags(), BackingLayout{0, 64, 64, true});
-    EXPECT_TRUE(group->crcEnabled());
-    EXPECT_EQ(group->payloadBytes(), 48u);
-    EXPECT_EQ(group->storageBytes(), 64u);
-    group->initialize(0, group->topologyPtr(), group->groupTags());
-    EXPECT_FALSE(group->crcEnabled());
-    EXPECT_EQ(group->storageBytes(), 48u);
+    Cuda3DBatchDeviceHostCopyStrategy strategy({group});
+    EXPECT_TRUE(strategy.templates_.empty());
+}
+
+TEST(DeviceHostCopyTemplateTest, AllCopyStrategiesPreserveHostBackingPadding) {
+    void* raw = nullptr;
+    ASSERT_EQ(cudaMallocHost(&raw, 16384), cudaSuccess);
+    std::unique_ptr<void, decltype(&cudaFreeHost)> storage(raw, cudaFreeHost);
+    auto*                                          input  = static_cast<uint8_t*>(raw);
+    auto*                                          output = input + 8192;
+    BlockTreeTaskPool                              tasks(1, 8, "BackingPaddingTest");
+    DeviceHostCopyOptions                          options;
+    options.staged_sm_min_tile_count = 1;
+    options.staged_sm_min_bytes      = 1;
+    for (auto type : {CacheGroupType::FULL, CacheGroupType::SWA}) {
+        auto policy                = defaultCacheGroupPolicy(type);
+        policy.sliding_window_size = type == CacheGroupType::SWA ? 2 : 0;
+        for (const auto [logical_width, stride, physical_payload] :
+             {std::tuple<size_t, size_t, bool>{16, 16, false}, {100, 128, false}, {100, 128, true}}) {
+            const size_t width   = physical_payload ? stride : logical_width;
+            const size_t payload = 2 * width;
+            auto         pool    = regularPool(stride, 2);
+            auto         group   = makeTestGroupSet(0,
+                                          makeTestTopology({makeTestGroupBase(policy, {0, 1}, logical_width)}),
+                                                    {"group0"},
+                                                    {pool},
+                                          nullptr,
+                                          nullptr,
+                                          false,
+                                          physical_payload ? payload : 0);
+            for (size_t path = 0; path < 4; ++path) {
+                SCOPED_TRACE(::testing::Message() << "type=" << static_cast<int>(type) << " W=" << width << " B="
+                                                  << stride << " physical=" << physical_payload << " path=" << path);
+                std::fill_n(input, 8192, 0xA5);
+                std::fill_n(output, 8192, 0x6B);
+                for (size_t slot = 0; slot < 2; ++slot) {
+                    for (size_t i = 0; i < payload; ++i) {
+                        input[slot * 4096 + i] = static_cast<uint8_t>(i + 1 + slot * 17);
+                    }
+                }
+                ASSERT_EQ(cudaMemset(pool->getBaseAddress(), 0xCC, pool->getTotalSizeBytes()), cudaSuccess);
+                ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+                DeviceHostTransferExecutor executor(tasks, 8, options);
+                executor.strategies_.clear();
+                if (path == 0) {
+                    executor.strategies_.push_back(
+                        std::make_unique<Cuda3DBatchDeviceHostCopyStrategy>(std::vector<GroupSetPtr>{group}));
+                } else if (path == 1) {
+                    executor.strategies_.push_back(std::make_unique<CudaBatchDeviceHostCopyStrategy>());
+                } else if (path == 2) {
+                    executor.strategies_.push_back(std::make_unique<StagedSmDeviceHostCopyStrategy>());
+                } else {
+                    executor.strategies_.push_back(std::make_unique<GenericMultiCopyDeviceHostCopyStrategy>());
+                }
+                ASSERT_TRUE(executor
+                                .executeBatch({{input, payload, 4096}, {input + 4096, payload, 4096}},
+                                              {TransferDescriptor::hostToDevice(0, 0, {1}),
+                                               TransferDescriptor::hostToDevice(0, 1, {4})},
+                                              {group.get(), group.get()})
+                                .ok());
+                ASSERT_TRUE(executor
+                                .executeBatch({{output, payload, 4096}, {output + 4096, payload, 4096}},
+                                              {TransferDescriptor::deviceToHost(0, {1}, 0),
+                                               TransferDescriptor::deviceToHost(0, {4}, 1)},
+                                              {group.get(), group.get()})
+                                .ok());
+                std::vector<uint8_t>      actual(10 * stride), expected(10 * stride, 0xCC);
+                const std::vector<size_t> blocks{1, 4};
+                for (size_t slot = 0; slot < 2; ++slot) {
+                    const size_t offset = slot * 4096;
+                    EXPECT_TRUE(std::equal(input + offset, input + offset + payload, output + offset));
+                    EXPECT_TRUE(std::all_of(
+                        input + offset + payload, input + offset + 4096, [](uint8_t value) { return value == 0xA5; }));
+                    EXPECT_TRUE(std::all_of(output + offset + payload, output + offset + 4096, [](uint8_t value) {
+                        return value == 0x6B;
+                    }));
+                    for (size_t layer = 0; layer < 2; ++layer) {
+                        std::copy_n(input + offset + layer * width,
+                                    width,
+                                    expected.data() + (layer * 5 + blocks[slot]) * stride);
+                    }
+                }
+                ASSERT_EQ(cudaMemcpy(actual.data(), pool->getBaseAddress(), actual.size(), cudaMemcpyDeviceToHost),
+                          cudaSuccess);
+                EXPECT_EQ(actual, expected);
+            }
+        }
+    }
 }
 
 TEST(DeviceHostCopyTemplateTest, RealCudaRoundTripPreservesOtherBlocks) {
@@ -138,7 +275,7 @@ TEST(DeviceHostCopyTemplateTest, RealCudaRoundTripPreservesOtherBlocks) {
         ASSERT_EQ(cudaMemset(pool->getBaseAddress(), 0xA5, pool->getTotalSizeBytes()), cudaSuccess);
     }
     ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
-    Cuda3DBatchDeviceHostCopyStrategy strategy;
+    Cuda3DBatchDeviceHostCopyStrategy strategy({group});
     auto                              result = strategy.tryExecute(
         {{input, 48, 48}, {input + 48, 48, 48}},
         {TransferDescriptor::hostToDevice(0, 1, first_blocks), TransferDescriptor::hostToDevice(0, 2, second_blocks)},
@@ -147,6 +284,7 @@ TEST(DeviceHostCopyTemplateTest, RealCudaRoundTripPreservesOtherBlocks) {
         GTEST_SKIP() << "Installed CUDA runtime/driver does not support 3D batch";
     }
     ASSERT_EQ(result.status, StrategyStatus::DONE);
+    const auto* templates = strategy.templates_.at(group.get()).data();
     ASSERT_EQ(strategy
                   .tryExecute({{output, 48, 48}, {output + 48, 48, 48}},
                               {TransferDescriptor::deviceToHost(0, first_blocks, 1),
@@ -154,12 +292,13 @@ TEST(DeviceHostCopyTemplateTest, RealCudaRoundTripPreservesOtherBlocks) {
                               {group.get(), group.get()})
                   .status,
               StrategyStatus::DONE);
+    EXPECT_EQ(strategy.templates_.at(group.get()).data(), templates);
     EXPECT_TRUE(std::equal(input, input + 96, output));
     // Compare the complete physical pools, including every unselected block.
     for (size_t member = 0; member < group->devicePools().size(); ++member) {
         const auto&          pool = group->devicePools()[member];
         std::vector<uint8_t> expected(pool->getTotalSizeBytes(), 0xA5), actual(expected.size());
-        const auto&          t = group->copy3DTemplates()[member];
+        const auto&          t = strategy.templates_.at(group.get())[member];
         for (size_t layer = 0; layer < t.layer_count; ++layer) {
             std::copy_n(input + t.host_offset + layer * t.width_bytes,
                         t.width_bytes,
@@ -198,29 +337,23 @@ private:
     std::function<StrategyResult(const DeviceHostCopyPlan&)> action_;
 };
 
-TEST(DeviceHostCopyTemplateTest, RejectsMismatchedCopyWidthBeforeLegacyDispatch) {
+TEST(DeviceHostCopyTemplateTest, RejectsOversizedCopyWidthBeforeLegacyDispatch) {
     BlockTreeTaskPool tasks(1, 8, "WidthMismatchTest");
-    for (const auto [physical_width, copy_width] :
-         {std::pair<size_t, size_t>{16, 8}, std::pair<size_t, size_t>{8, 16}}) {
-        SCOPED_TRACE(::testing::Message() << "physical=" << physical_width << " copy=" << copy_width);
-        auto pool  = regularPool(physical_width, 1);
-        auto group = makeTestGroupSet(
-            0,
-            makeTestTopology({makeTestGroupBase(defaultCacheGroupPolicy(CacheGroupType::FULL), {0}, copy_width)}),
-            {"group0"},
-            {pool});
-        std::vector<uint8_t>       host(copy_width);
-        DeviceHostTransferExecutor executor(tasks, 8);
-        executor.strategies_.clear();
-        executor.strategies_.push_back(
-            std::make_unique<TileProbe>([](const DeviceHostCopyPlan&) { return StrategyResult::done(); }));
-        EXPECT_EQ(executor
-                      .executeBatch({{host.data(), copy_width, copy_width}},
-                                    {TransferDescriptor::hostToDevice(0, 1, {1})},
-                                    {group.get()})
-                      .copy_error,
-                  CacheCopyError::INVALID_REQUEST);
-    }
+    auto              pool = regularPool(8, 1);
+    auto              group =
+        makeTestGroupSet(0,
+                         makeTestTopology({makeTestGroupBase(defaultCacheGroupPolicy(CacheGroupType::FULL), {0}, 16)}),
+                         {"group0"},
+                         {pool});
+    std::vector<uint8_t>       host(16);
+    DeviceHostTransferExecutor executor(tasks, 8);
+    executor.strategies_.clear();
+    executor.strategies_.push_back(
+        std::make_unique<TileProbe>([](const DeviceHostCopyPlan&) { return StrategyResult::done(); }));
+    EXPECT_EQ(
+        executor.executeBatch({{host.data(), 16, 16}}, {TransferDescriptor::hostToDevice(0, 1, {1})}, {group.get()})
+            .copy_error,
+        CacheCopyError::INVALID_REQUEST);
 }
 
 TEST(DeviceHostCopyTemplateTest, RejectsMixedDirectionBeforeStrategyDispatch) {
@@ -336,7 +469,7 @@ TEST(DeviceHostCopyTemplateTest, RejectsInvalid3DAddressesBeforeSubmission) {
     std::vector<uint8_t>              host(48);
     HostBufferView                    view{host.data(), 48, 48};
     auto                              desc = TransferDescriptor::hostToDevice(0, 1, {1, 2, 3});
-    Cuda3DBatchDeviceHostCopyStrategy strategy;
+    Cuda3DBatchDeviceHostCopyStrategy strategy({group});
     auto                              short_view = view;
     short_view.capacity_bytes                    = 47;
     auto result                                  = strategy.tryExecute({short_view}, {desc}, {group.get()});
@@ -371,9 +504,10 @@ TEST(DeviceHostCopyTemplateTest, SeparatesLayoutsWithNonzeroOffsets) {
     auto second                                             = first;
     second.layer_num                                        = 1;
     second.kv_cache_offset_bytes                            = 128;
-    second.kv_block_pool_size_bytes = second.total_size_bytes = 40;
+    second.kv_block_stride_bytes = second.block_stride_bytes = 16;
+    second.kv_block_pool_size_bytes = second.total_size_bytes = 80;
     config->memory_layouts                                    = {first, second};
-    config->total_size_bytes                                  = 168;
+    config->total_size_bytes                                  = 208;
     auto pool                                                 = std::make_shared<DeviceBlockPool>(config);
     ASSERT_TRUE(pool->init());
     auto group = makeTestGroupSet(
@@ -381,13 +515,17 @@ TEST(DeviceHostCopyTemplateTest, SeparatesLayoutsWithNonzeroOffsets) {
         makeTestTopology({makeTestGroupBase(defaultCacheGroupPolicy(CacheGroupType::FULL), {0, 1, 2}, 8)}),
         {"group0"},
         {pool});
-    const auto& templates = group->copy3DTemplates();
+    const auto templates = Cuda3DBatchDeviceHostCopyStrategy::initializeCopy3DTemplates(*group);
     ASSERT_EQ(templates.size(), 2u);
     EXPECT_EQ(templates[0].layer_count, 2u);
     EXPECT_EQ(templates[1].layer_count, 1u);
     EXPECT_EQ(templates[0].device_base, static_cast<uint8_t*>(pool->getBaseAddress()) + 16);
     EXPECT_EQ(templates[1].device_base, static_cast<uint8_t*>(pool->getBaseAddress()) + 128);
     EXPECT_EQ(templates[1].host_offset, 16u);
+    EXPECT_EQ(templates[0].device_block_stride, 8u);
+    EXPECT_EQ(templates[1].device_block_stride, 16u);
+    EXPECT_EQ(templates[0].device_pitch, 40u);
+    EXPECT_EQ(templates[1].device_pitch, 80u);
     BlockTreeTaskPool          tasks(1, 8, "SplitLayoutTest");
     DeviceHostTransferExecutor executor(tasks, 8);
     std::vector<uint8_t>       host(24);
@@ -396,14 +534,36 @@ TEST(DeviceHostCopyTemplateTest, SeparatesLayoutsWithNonzeroOffsets) {
     ASSERT_EQ(status, TransferStatus::OK);
     ASSERT_EQ(plans.size(), 1u);
     ASSERT_EQ(plans[0].copy_tiles.size(), 3u);
-    size_t row = 0;
-    for (const auto& t : templates) {
-        for (size_t layer = 0; layer < t.layer_count; ++layer) {
-            EXPECT_EQ(plans[0].copy_tiles[row].device_addr,
-                      static_cast<uint8_t*>(t.device_base) + 3 * t.width_bytes + layer * t.device_pitch);
-            EXPECT_EQ(plans[0].copy_tiles[row++].host_addr, host.data() + t.host_offset + layer * t.width_bytes);
-        }
+    const std::vector<size_t> offsets{40, 80, 176};
+    for (size_t row = 0; row < offsets.size(); ++row) {
+        EXPECT_EQ(plans[0].copy_tiles[row].device_addr, static_cast<uint8_t*>(pool->getBaseAddress()) + offsets[row]);
+        EXPECT_EQ(plans[0].copy_tiles[row].host_addr, host.data() + row * 8);
+        EXPECT_EQ(plans[0].copy_tiles[row].bytes, 8u);
     }
+    void* raw = nullptr;
+    ASSERT_EQ(cudaMallocHost(&raw, 48), cudaSuccess);
+    std::unique_ptr<void, decltype(&cudaFreeHost)> storage(raw, cudaFreeHost);
+    auto*                                          input  = static_cast<uint8_t*>(raw);
+    auto*                                          output = input + 24;
+    for (size_t i = 0; i < 24; ++i) {
+        input[i] = static_cast<uint8_t>(i + 1);
+    }
+    ASSERT_EQ(cudaMemset(pool->getBaseAddress(), 0xA5, pool->getTotalSizeBytes()), cudaSuccess);
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    Cuda3DBatchDeviceHostCopyStrategy strategy({group});
+    ASSERT_EQ(
+        strategy.tryExecute({{input, 24, 24}}, {TransferDescriptor::hostToDevice(0, 1, {3})}, {group.get()}).status,
+        StrategyStatus::DONE);
+    ASSERT_EQ(
+        strategy.tryExecute({{output, 24, 24}}, {TransferDescriptor::deviceToHost(0, {3}, 1)}, {group.get()}).status,
+        StrategyStatus::DONE);
+    EXPECT_TRUE(std::equal(input, input + 24, output));
+    std::vector<uint8_t> actual(208), expected(208, 0xA5);
+    for (size_t row = 0; row < offsets.size(); ++row) {
+        std::copy_n(input + row * 8, 8, expected.data() + offsets[row]);
+    }
+    ASSERT_EQ(cudaMemcpy(actual.data(), pool->getBaseAddress(), actual.size(), cudaMemcpyDeviceToHost), cudaSuccess);
+    EXPECT_EQ(actual, expected);
 }
 
 TEST(DeviceHostCopyTemplateTest, MixedDeviceBatchFallsBackToPerDevicePlans) {
@@ -422,7 +582,8 @@ TEST(DeviceHostCopyTemplateTest, MixedDeviceBatchFallsBackToPerDevicePlans) {
     BlockTreeTaskPool          tasks(1, 8, "MixedDevicesTest");
     DeviceHostTransferExecutor executor(tasks, 8);
     executor.strategies_.clear();
-    executor.strategies_.push_back(std::make_unique<Cuda3DBatchDeviceHostCopyStrategy>());
+    executor.strategies_.push_back(
+        std::make_unique<Cuda3DBatchDeviceHostCopyStrategy>(std::vector<GroupSetPtr>{first, second}));
     std::vector<int> planned_devices;
     executor.strategies_.push_back(std::make_unique<TileProbe>([&](const DeviceHostCopyPlan& plan) {
         planned_devices.push_back(plan.copy_tiles.front().device_index);
