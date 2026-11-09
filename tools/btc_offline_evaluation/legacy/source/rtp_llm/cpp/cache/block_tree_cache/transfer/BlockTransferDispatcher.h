@@ -1,0 +1,63 @@
+#pragma once
+
+#include <cstddef>
+#include <functional>
+#include <future>
+#include <memory>
+#include <mutex>
+#include <vector>
+
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferAsyncContext.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTypes.h"
+
+namespace rtp_llm {
+
+class MultiRankBlockTransferEngine;
+class PerRankBlockTransferEngine;
+struct BlockTreeQueueSizes;
+
+class BlockTransferDispatcher {
+public:
+    using TransferDoneCallback = std::function<void(TransferResult)>;
+
+    BlockTransferDispatcher(std::shared_ptr<PerRankBlockTransferEngine>   per_rank_engine,
+                            std::shared_ptr<MultiRankBlockTransferEngine> multi_rank_engine         = nullptr,
+                            size_t                                        max_descriptors_per_batch = 8);
+    // Inject an executor without constructing physical transfer engines.
+    using Submitter = std::function<std::shared_ptr<TransferAsyncContext>(TransferTask)>;
+    struct WithSubmitter {};
+    BlockTransferDispatcher(WithSubmitter, Submitter submitter, size_t max_descriptors_per_batch = 8);
+    bool hasPendingTransfers() const;
+    ~BlockTransferDispatcher();
+
+    std::shared_ptr<TransferAsyncContext> executePerRank(TransferTask task) const;
+
+    // Callback-driven path used by Load/Store/Evict: stable grouping and bounded batches.
+    // completion_operation is an optional borrowed literal for new completion
+    // observations only. Existing physical transfer stage identities are unchanged.
+    void
+    runTransfer(TransferTask task, TransferDoneCallback callback, const char* completion_operation = nullptr) const;
+
+    void                cancelPendingStagingTransfers() const;
+    BlockTreeQueueSizes queueSizes() const;
+
+    // Lifecycle-only drain, not task admission or a request-level sync API.
+    // Call after producers stop; callbacks can still submit a subsequent stage.
+    void drainTransfers() const;
+
+private:
+    std::shared_ptr<TransferAsyncContext> executeMultiRank(TransferTask task,
+                                                           const char*  completion_operation = nullptr) const;
+
+    std::shared_ptr<PerRankBlockTransferEngine>   per_rank_engine_;
+    std::shared_ptr<MultiRankBlockTransferEngine> multi_rank_engine_;
+    Submitter                                     submitter_;
+    size_t                                        max_descriptors_per_batch_{8};
+    mutable std::mutex                            completion_mutex_;
+    mutable std::vector<std::shared_future<void>> transfer_completions_;
+    std::function<void()>                         drain_observer_for_test_;
+};
+
+using BlockTransferDispatcherPtr = std::shared_ptr<BlockTransferDispatcher>;
+
+}  // namespace rtp_llm

@@ -1,0 +1,102 @@
+{
+  "1": {
+    "device": {
+      "full": 99279,
+      "swa": 1000,
+      "allocated_bytes": 25680918656,
+      "unused_bytes": 8576
+    },
+    "host": {
+      "full": 464824,
+      "swa": 4682,
+      "allocated_bytes": 120242844096,
+      "unused_bytes": 16240192
+    },
+    "disk": {
+      "full": 8367829,
+      "swa": 84286,
+      "allocated_bytes": 2199004344320,
+      "unused_bytes": 18911232
+    }
+  },
+  "5": {
+    "device": {
+      "full": 91906,
+      "swa": 5000,
+      "allocated_bytes": 25680914560,
+      "unused_bytes": 12672
+    },
+    "host": {
+      "full": 430359,
+      "swa": 23413,
+      "allocated_bytes": 120258042848,
+      "unused_bytes": 1041440
+    },
+    "disk": {
+      "full": 7751921,
+      "swa": 421731,
+      "allocated_bytes": 2199020609536,
+      "unused_bytes": 2646016
+    }
+  },
+  "10": {
+    "device": {
+      "full": 82689,
+      "swa": 10000,
+      "allocated_bytes": 25680718976,
+      "unused_bytes": 208256
+    },
+    "host": {
+      "full": 387199,
+      "swa": 46826,
+      "allocated_bytes": 120256690224,
+      "unused_bytes": 2394064
+    },
+    "disk": {
+      "full": 6980729,
+      "swa": 844215,
+      "allocated_bytes": 2199022919680,
+      "unused_bytes": 335872
+    }
+  },
+  "15": {
+    "device": {
+      "full": 73473,
+      "swa": 15000,
+      "allocated_bytes": 25680777344,
+      "unused_bytes": 149888
+    },
+    "host": {
+      "full": 344049,
+      "swa": 70240,
+      "allocated_bytes": 120258345392,
+      "unused_bytes": 738896
+    },
+    "disk": {
+      "full": 6208174,
+      "swa": 1267440,
+      "allocated_bytes": 2199022551040,
+      "unused_bytes": 704512
+    }
+  },
+  "20": {
+    "device": {
+      "full": 64257,
+      "swa": 20000,
+      "allocated_bytes": 25680835712,
+      "unused_bytes": 91520
+    },
+    "host": {
+      "full": 300893,
+      "swa": 93653,
+      "allocated_bytes": 120258008640,
+      "unused_bytes": 1075648
+    },
+    "disk": {
+      "full": 5434256,
+      "swa": 1691413,
+      "allocated_bytes": 2199022800896,
+      "unused_bytes": 454656
+    }
+  }
+}

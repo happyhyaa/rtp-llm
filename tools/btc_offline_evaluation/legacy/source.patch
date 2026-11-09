@@ -1,0 +1,3150 @@
+diff --git a/rtp_llm/cpp/cache/CacheConfig.h b/rtp_llm/cpp/cache/CacheConfig.h
+index 5a4fc5785..48e37e58c 100644
+--- a/rtp_llm/cpp/cache/CacheConfig.h
++++ b/rtp_llm/cpp/cache/CacheConfig.h
+@@ -43,6 +43,8 @@ public:
+         return std::max(0, prompt_tokens - std::max(1, cache_min_replay_tokens));
+     }
+ 
++    bool metadata_only = false;  // Offline cache lifecycle without KV payload backing.
++
+     bool use_typed_cache_regions                  = false;
+     bool use_opaque_kv_cache_store                = false;
+     bool disable_decode_first_malloc_device_reuse = false;
+diff --git a/rtp_llm/cpp/cache/CoordinatorCacheManager.cc b/rtp_llm/cpp/cache/CoordinatorCacheManager.cc
+index e13fcc099..d803f47b7 100644
+--- a/rtp_llm/cpp/cache/CoordinatorCacheManager.cc
++++ b/rtp_llm/cpp/cache/CoordinatorCacheManager.cc
+@@ -449,26 +449,26 @@ std::vector<KVCachePoolMetricsSnapshot> CoordinatorCacheManager::poolMetricsSnap
+ 
+         const size_t               pool_index = groupIdForTag(group->tag());
+         KVCachePoolMetricsSnapshot snapshot;
+-        snapshot.pool_index                 = pool_index;
+-        snapshot.pool_name                  = pool->poolName();
+-        snapshot.block_size_bytes           = pool->blockSizeBytes();
+-        snapshot.total_blocks               = pool->totalBlocksNum();
+-        snapshot.free_blocks                = pool->freeBlocksNum();
+-        snapshot.used_blocks                = snapshot.total_blocks - snapshot.free_blocks;
+-        snapshot.active_blocks              = pool->activeBlocksNum();
+-        snapshot.available_blocks           = pool->availableBlocksNum();
+-        snapshot.reserve_blocks             = reserveBlocksForPoolMetrics(pool_index);
+-        snapshot.request_ref_blocks         = pool->referencedBlocksNum();
++        snapshot.pool_index                  = pool_index;
++        snapshot.pool_name                   = pool->poolName();
++        snapshot.block_size_bytes            = pool->blockSizeBytes();
++        snapshot.total_blocks                = pool->totalBlocksNum();
++        snapshot.free_blocks                 = pool->freeBlocksNum();
++        snapshot.used_blocks                 = snapshot.total_blocks - snapshot.free_blocks;
++        snapshot.active_blocks               = pool->activeBlocksNum();
++        snapshot.available_blocks            = pool->availableBlocksNum();
++        snapshot.reserve_blocks              = reserveBlocksForPoolMetrics(pool_index);
++        snapshot.request_ref_blocks          = pool->referencedBlocksNum();
+         snapshot.remote_connector_ref_blocks = pool->referencedBlocksNum(DeviceBlockRefType::REMOTE_CONNECTOR);
+         snapshot.pd_connector_ref_blocks     = pool->referencedBlocksNum(DeviceBlockRefType::PD_CONNECTOR);
+-        snapshot.block_cache_ref_blocks     = pool->referencedBlocksNum(BlockTreeRefType::CACHE);
+-        snapshot.load_ref_blocks            = pool->referencedBlocksNum(BlockTreeRefType::LOAD);
+-        snapshot.eviction_target_ref_blocks = pool->referencedBlocksNum(BlockTreeRefType::EVICTION);
+-        snapshot.store_ref_blocks           = pool->referencedBlocksNum(BlockTreeRefType::STORE);
+-        snapshot.frozen_ref_blocks          = pool->referencedBlocksNum(BlockTreeRefType::FROZEN);
+-        snapshot.used_ratio                 = snapshot.total_blocks == 0 ?
+-                                                  0.0f :
+-                                                  static_cast<float>(100.0 * (snapshot.total_blocks - snapshot.available_blocks)
++        snapshot.block_cache_ref_blocks      = pool->referencedBlocksNum(BlockTreeRefType::CACHE);
++        snapshot.load_ref_blocks             = pool->referencedBlocksNum(BlockTreeRefType::LOAD);
++        snapshot.eviction_target_ref_blocks  = pool->referencedBlocksNum(BlockTreeRefType::EVICTION);
++        snapshot.store_ref_blocks            = pool->referencedBlocksNum(BlockTreeRefType::STORE);
++        snapshot.frozen_ref_blocks           = pool->referencedBlocksNum(BlockTreeRefType::FROZEN);
++        snapshot.used_ratio                  = snapshot.total_blocks == 0 ?
++                                                   0.0f :
++                                                   static_cast<float>(100.0 * (snapshot.total_blocks - snapshot.available_blocks)
+                                                      / static_cast<double>(snapshot.total_blocks));
+         snapshots.push_back(std::move(snapshot));
+     }
+@@ -1076,7 +1076,7 @@ std::shared_ptr<KVCacheResource> CoordinatorCacheManager::incrKVCacheRef(const K
+     }
+ 
+     const auto ref_type              = is_connector ? DeviceBlockRefType::PD_CONNECTOR : DeviceBlockRefType::REQUEST;
+-    auto selected_resource_ptr = new KVCacheResource(kvcache_resource);
++    auto       selected_resource_ptr = new KVCacheResource(kvcache_resource);
+     auto       deleter               = [self = shared_from_this(), ref_type](KVCacheResource* resource) {
+         self->decrKVCacheRef(*resource, ref_type);
+         delete resource;
+@@ -1608,9 +1608,10 @@ bool CoordinatorCacheManager::doInit() {
+     group_pool_configs.reserve(static_cast<size_t>(group_nums));
+     const auto& topology_groups = config_.topology().groups();
+     for (const auto& group : topology_groups) {
+-        const int              group_id    = static_cast<int>(group_pool_configs.size());
+-        DeviceBlockPoolConfig  pool_config = DeviceBlockPoolConfigHelper::createConfigForGroup(config_, group);
+-        const CacheGroupPolicy policy      = group.policy;
++        const int             group_id    = static_cast<int>(group_pool_configs.size());
++        DeviceBlockPoolConfig pool_config = DeviceBlockPoolConfigHelper::createConfigForGroup(config_, group);
++        pool_config.metadata_only         = config_.metadata_only;
++        const CacheGroupPolicy policy     = group.policy;
+         if (policy.memory_placement == CacheMemoryPlacement::DEVICE) {
+             pool_config.use_pinned_cpu_backing = allocation_type_ == AllocationType::HOST;
+             pool_config.use_device_malloc_backing =
+@@ -1679,7 +1680,7 @@ bool CoordinatorCacheManager::doInit() {
+     }
+ 
+ #if USING_CUDA
+-    if (allocation_type_ == AllocationType::DEVICE && group_nums == 1
++    if (!config_.metadata_only && allocation_type_ == AllocationType::DEVICE && group_nums == 1
+         && topology_groups.front().policy.group_type == CacheGroupType::FULL) {
+         const auto&                    group         = topology_groups.front();
+         const auto                     kv_tensors    = kv_cache_groups_.front()->allLayerCacheBase();
+@@ -1877,6 +1878,13 @@ void CoordinatorCacheManager::blockBatchCopyForForward(const torch::Tensor&
+ }
+ 
+ void CoordinatorCacheManager::blockBatchCopyByGroup(const std::vector<TaggedBlockIdPair>& copy_mapping) {
++    if (config_.metadata_only) {
++        for (const auto& mapping : copy_mapping) {
++            const auto& pool = group_block_pools_[groupIdForTag(mapping.tag)];
++            RTP_LLM_CHECK(pool->isAllocated(mapping.src) && pool->isAllocated(mapping.dst));
++        }
++        return;
++    }
+     if (copy_mapping.empty()) {
+         return;
+     }
+diff --git a/rtp_llm/cpp/cache/SingleTypeCacheManager.cc b/rtp_llm/cpp/cache/SingleTypeCacheManager.cc
+index 233b6a060..7c8ffa348 100644
+--- a/rtp_llm/cpp/cache/SingleTypeCacheManager.cc
++++ b/rtp_llm/cpp/cache/SingleTypeCacheManager.cc
+@@ -7,6 +7,8 @@
+ namespace rtp_llm {
+ 
+ bool SingleTypeCacheManager::init() {
++    if (block_pool_->metadataOnly())
++        return true;
+     auto layer_tensors = block_pool_->allLayerCacheBase();
+     auto scale_tensors = block_pool_->allLayerScaleCacheBase();
+ 
+diff --git a/rtp_llm/cpp/cache/block_tree_cache/BUILD b/rtp_llm/cpp/cache/block_tree_cache/BUILD
+index d93ff33e1..6b796bc28 100644
+--- a/rtp_llm/cpp/cache/block_tree_cache/BUILD
++++ b/rtp_llm/cpp/cache/block_tree_cache/BUILD
+@@ -113,6 +113,7 @@ cc_library(
+     }),
+     hdrs = [
+         "BlockTree.h",
++        "BlockTreeGroupLayout.h",
+         "BlockTreeCache.h",
+         "diagnostic/FullPrefixInvariantScanner.h",
+         "BlockTreeCacheFactory.h",
+diff --git a/rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.cc b/rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.cc
+index 10c496c35..b94adf88d 100644
+--- a/rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.cc
++++ b/rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.cc
+@@ -185,6 +185,7 @@ size_t BlockTreeCache::insert(const CacheKeysType&
+ }
+ 
+ int BlockTreeCache::evictForGroup(std::string_view group_tag, size_t num_blocks) {
++    auto                        timing = metrics_reporter_->measureEvictionPass(true);
+     std::lock_guard<std::mutex> lock(mutex_);
+     if (!config_.isTierEnabled(Tier::DEVICE)) {
+         return 0;
+@@ -273,6 +274,7 @@ void BlockTreeCache::onWorkflowSettledLocked(bool check_watermark) {
+ }
+ 
+ void BlockTreeCache::checkWatermark() {
++    auto timing = metrics_reporter_->measureEvictionPass(false);
+     for (Tier tier : {Tier::DISK, Tier::HOST, Tier::DEVICE}) {
+         const auto watermark = config_.watermarkForTier(tier);
+         if (!config_.isTierEnabled(tier)) {
+diff --git a/rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheFactory.cc b/rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheFactory.cc
+index 3eb96ef7e..a27951195 100644
+--- a/rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheFactory.cc
++++ b/rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheFactory.cc
+@@ -1,5 +1,7 @@
+ #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheFactory.h"
+ 
++#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeGroupLayout.h"
++
+ #include <algorithm>
+ #include <cctype>
+ #include <cmath>
+@@ -79,18 +81,6 @@ size_t checkedQueueSize(int64_t value, const char* name) {
+     return static_cast<size_t>(value);
+ }
+ 
+-int slidingWindowSize(const GroupBase& group) {
+-    RTP_LLM_CHECK_WITH_INFO(group.policy.group_type == CacheGroupType::SWA,
+-                            "sliding window requested for non-SWA tag=%s",
+-                            group.tag.c_str());
+-    RTP_LLM_CHECK_WITH_INFO(group.spec != nullptr, "SWA tag=%s has null cache spec", group.tag.c_str());
+-    RTP_LLM_CHECK_WITH_INFO(group.policy.sliding_window_size >= 0,
+-                            "SWA tag=%s has invalid sliding window=%d",
+-                            group.tag.c_str(),
+-                            group.policy.sliding_window_size);
+-    return group.policy.sliding_window_size;
+-}
+-
+ GroupSetPtr createGroupSet(const GroupBase&                group,
+                            std::vector<DeviceBlockPoolPtr> device_pools,
+                            std::shared_ptr<HostBlockPool>  host_pool,
+@@ -111,7 +101,7 @@ GroupSetPtr createGroupSet(const GroupBase&                group,
+                                     "SWA tag=%s has invalid seq_size_per_block=%zu",
+                                     group.tag.c_str(),
+                                     seq_size);
+-            result = std::make_shared<SWAGroupSet>(slidingWindowSize(group),
++            result = std::make_shared<SWAGroupSet>(block_tree_layout::slidingWindowSize(group),
+                                                    static_cast<int>(seq_size),
+                                                    std::move(device_pools),
+                                                    std::move(host_pool),
+@@ -232,60 +222,6 @@ BlockTreeDiskBlockPoolPtr createDiskPool(const KVCacheConfig&
+     return pool->init() ? pool : nullptr;
+ }
+ 
+-bool groupSetSemanticsCompatible(const CacheConfig& cache_config, std::string_view lhs_tag, std::string_view rhs_tag) {
+-    const GroupBase& lhs = cache_config.topology().group(lhs_tag);
+-    const GroupBase& rhs = cache_config.topology().group(rhs_tag);
+-    if (lhs.policy.group_type != rhs.policy.group_type || lhs.seqSizePerBlock() != rhs.seqSizePerBlock()
+-        || lhs.policy.cp_mapping != rhs.policy.cp_mapping) {
+-        return false;
+-    }
+-    if (lhs.policy.group_type == CacheGroupType::SWA) {
+-        if (slidingWindowSize(lhs) != slidingWindowSize(rhs)) {
+-            return false;
+-        }
+-    }
+-    if (lhs.policy.group_type == CacheGroupType::SWA || lhs.policy.group_type == CacheGroupType::LINEAR) {
+-        if (lhs.policy.active_tail_blocks != rhs.policy.active_tail_blocks) {
+-            return false;
+-        }
+-    }
+-    return true;
+-}
+-
+-bool buildGroupMembers(const CacheConfig& cache_config, std::vector<std::vector<std::string>>& group_members) {
+-    group_members.clear();
+-    for (const GroupBase& group : cache_config.topology().groups()) {
+-        if (!group.policy.enable_prefix_reuse) {
+-            continue;
+-        }
+-
+-        const CacheGroupType group_type = group.policy.group_type;
+-        if (group_type != CacheGroupType::FULL && group_type != CacheGroupType::SWA
+-            && group_type != CacheGroupType::LINEAR) {
+-            RTP_LLM_LOG_ERROR("unsupported reusable cache group type for tag=%s", group.tag.c_str());
+-            return false;
+-        }
+-
+-        auto it =
+-            std::find_if(group_members.begin(), group_members.end(), [&](const std::vector<std::string>& members) {
+-                const GroupBase& first = cache_config.topology().group(members.front());
+-                return first.policy.group_type == group.policy.group_type;
+-            });
+-        if (it == group_members.end()) {
+-            group_members.push_back({group.tag});
+-        } else {
+-            if (!groupSetSemanticsCompatible(cache_config, it->front(), group.tag)) {
+-                RTP_LLM_LOG_ERROR("incompatible BlockTree reuse coordinates for tags=%s and %s",
+-                                  it->front().c_str(),
+-                                  group.tag.c_str());
+-                return false;
+-            }
+-            it->push_back(group.tag);
+-        }
+-    }
+-    return true;
+-}
+-
+ BackingLayout computeBackingLayout(const CacheConfig&              cache_config,
+                                    const std::vector<std::string>& members,
+                                    bool                            enable_crc,
+@@ -538,7 +474,7 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&
+ 
+     std::vector<GroupSetPtr>              group_sets;
+     std::vector<std::vector<std::string>> group_members;
+-    if (!buildGroupMembers(cache_config, group_members)) {
++    if (!block_tree_layout::buildGroupMembers(cache_config, group_members)) {
+         return nullptr;
+     }
+     if (disk_enabled) {
+@@ -651,19 +587,9 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&
+ 
+     // Canonical CP keys cover a virtual token block. Keep the physical layout
+     // unchanged and publish the key stride only to cache matching/remote storage.
+-    auto cache_topology = cache_config.topologyPtr();
+-    if (const auto mapper = coordinator_manager->cpSlotMapper(); mapper && mapper->isSharded()) {
+-        auto         groups  = cache_topology->groups();
+-        const size_t cp_size = static_cast<size_t>(mapper->cpSize());
+-        RTP_LLM_CHECK_WITH_INFO(cache_config.seq_size_per_block <= std::numeric_limits<size_t>::max() / cp_size,
+-                                "canonical CP cache key stride overflow");
+-        for (auto& group : groups) {
+-            auto spec                    = group.spec->clone();
+-            spec->cache_key_token_stride = cache_config.seq_size_per_block * cp_size;
+-            group.spec                   = std::move(spec);
+-        }
+-        cache_topology = CacheTopology::create(std::move(groups), cache_topology->layers());
+-    }
++    const auto mapper = coordinator_manager->cpSlotMapper();
++    auto       cache_topology =
++        block_tree_layout::projectCacheKeys(cache_config, mapper && mapper->isSharded() ? mapper->cpSize() : 1);
+     group_sets.reserve(group_members.size());
+     for (size_t group_set_id = 0; group_set_id < group_members.size(); ++group_set_id) {
+         const std::vector<std::string>& members = group_members[group_set_id];
+diff --git a/rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheMetricsReporter.cc b/rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheMetricsReporter.cc
+index 6bfcc4726..e43344f76 100644
+--- a/rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheMetricsReporter.cc
++++ b/rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheMetricsReporter.cc
+@@ -238,6 +238,8 @@ void BlockTreeCacheMetricsReporter::reportEvictionBlocks(Tier           source_t
+                                                          bool           force_drop,
+                                                          size_t         required_blocks,
+                                                          size_t         scheduled_blocks) const {
++    if (eviction_observer_)
++        eviction_observer_(source_tier, group_type, force_drop, required_blocks, scheduled_blocks);
+     if (metrics_reporter_ == nullptr) {
+         return;
+     }
+diff --git a/rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheMetricsReporter.h b/rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheMetricsReporter.h
+index a045ee495..7a399c7fa 100644
+--- a/rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheMetricsReporter.h
++++ b/rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheMetricsReporter.h
+@@ -1,11 +1,14 @@
+ #pragma once
+ 
++#include <functional>
++#include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
+ #include <array>
+ #include <atomic>
+ #include <chrono>
+ #include <cstddef>
+ #include <cstdint>
+ #include <functional>
++#include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
+ #include <memory>
+ #include <optional>
+ #include <string>
+@@ -117,6 +120,24 @@ public:
+                              const char* operation,
+                              const char* source_tier,
+                              const char* target_tier) const noexcept;
++    // Configure before starting cache workers. Observer must not re-enter BTC.
++    using EvictionObserver = std::function<void(Tier, CacheGroupType, bool, size_t, size_t)>;
++    using EvictionTimer    = std::function<void(bool, uint64_t)>;
++    void setEvictionTimer(EvictionTimer timer) {
++        eviction_timer_ = std::move(timer);
++    }
++    auto measureEvictionPass(bool force) const {
++        using Clock = std::chrono::steady_clock;
++        auto start  = eviction_timer_ ? Clock::now() : Clock::time_point{};
++        return block_tree_cache_detail::ScopeRollback([this, force, start] {
++            if (eviction_timer_)
++                eviction_timer_(force,
++                                std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - start).count());
++        });
++    }
++    void setEvictionObserver(EvictionObserver observer) {
++        eviction_observer_ = std::move(observer);
++    }
+ 
+     std::vector<BlockTreePoolMetricsSnapshot>
+     collectPoolMetricsSnapshots(const std::vector<GroupSetPtr>&       group_sets,
+@@ -166,6 +187,8 @@ public:
+     void reportQueueBacklog(const BlockTreeQueueSizes& queue_sizes, const char* pool_type) const;
+ 
+ private:
++    EvictionTimer    eviction_timer_;
++    EvictionObserver eviction_observer_;
+     struct PoolIOSample {
+         size_t                                read_bytes{0};
+         size_t                                write_bytes{0};
+diff --git a/rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h b/rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h
+index 7bbda4991..0cbb6846a 100644
+--- a/rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h
++++ b/rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h
+@@ -55,7 +55,10 @@ public:
+     void stopAdmission();
+     // Wait only for queued/running task bodies, including submitted completions.
+     // External asynchronous transfers must be drained by their owner.
+-    void waitForIdle();
++    void   waitForIdle();
++    size_t pendingTaskCount() const {
++        return static_cast<size_t>(pending_tasks_.load());
++    }
+     void shutdown();
+ 
+     BlockTreeQueueSizes queueSizes() const;
+diff --git a/rtp_llm/cpp/cache/block_tree_cache/benchmark/BUILD b/rtp_llm/cpp/cache/block_tree_cache/benchmark/BUILD
+index 7f39ceb86..ed29bcd39 100644
+--- a/rtp_llm/cpp/cache/block_tree_cache/benchmark/BUILD
++++ b/rtp_llm/cpp/cache/block_tree_cache/benchmark/BUILD
+@@ -309,3 +309,82 @@ cc_test(
+         "@com_google_googletest//:gtest_main",
+     ],
+ )
++
++cc_test(
++    name = "serial_trace_reader_test",
++    srcs = ["trace/TraceReaderTest.cc", "trace/TraceReader.h"],
++    copts = copts(),
++)
++
++cc_binary(
++    name = "serial_trace_replay",
++    target_compatible_with = CUDA_ONLY,
++    srcs = ["trace/SerialTraceReplay.cc", "trace/TraceReader.h"],
++    copts = copts() + ["-fno-access-control"],
++    tags = ["manual"],
++    deps = [
++        ":benchmark_fixture",
++        ":online_tree_scheduler",
++        "//rtp_llm/cpp/cache:cache_types",
++        "//rtp_llm/cpp/cache:cp_slot_mapper",
++        "//rtp_llm/cpp/cache:single_type_cache_manager",
++        "//rtp_llm/cpp/cache/block_tree_cache",
++        "@local_config_cuda//cuda:cudart",
++        "@local_config_cuda//cuda:cuda_headers",
++    ],
++)
++
++cc_binary(
++    name = "metadata_pool_test",
++    srcs = ["metadata/MetadataPoolTest.cc"],
++    copts = copts(),
++    tags = ["manual"],
++    deps = [
++        "//rtp_llm/cpp/cache/block_tree_cache",
++        "//rtp_llm/cpp/cache/block_tree_cache:device_block_pool",
++        "//rtp_llm/cpp/config:static_config",
++    ],
++)
++
++cc_library(
++    name = "metadata_replay_lib",
++    srcs = ["metadata/MetadataReplay.cc"],
++    hdrs = ["metadata/MetadataReplay.h", "metadata/Dsv41Profile.h"],
++    copts = copts(),
++    deps = [
++        ":benchmark_fixture",
++        ":metadata_no_payload_ops",
++        "//rtp_llm/cpp/cache:kv_cache_specs",
++        "//rtp_llm/cpp/cache:coordinator_cache_manager",
++        "//rtp_llm/cpp/cache:cache_config",
++        "//rtp_llm/cpp/cache:cp_slot_mapper",
++        "//rtp_llm/cpp/engine_base/stream:complete_token_ids",
++        "//rtp_llm/cpp/cache/block_tree_cache",
++    ],
++)
++cc_binary(
++    name = "metadata_replay_test",
++    srcs = ["metadata/MetadataReplayTest.cc"],
++    copts = copts(),
++    deps = [":metadata_replay_lib"],
++)
++cc_binary(
++    name = "metadata_replay",
++    srcs = ["metadata/MetadataReplayMain.cc"],
++    copts = copts(),
++    deps = [":metadata_replay_lib", "@rapidjson", "//rtp_llm/cpp/utils:core_utils"],
++)
++
++cc_library(
++    name = "metadata_no_payload_ops",
++    srcs = ["metadata/NoPayloadOps.cc"],
++    copts = copts(),
++    alwayslink = True,
++)
++
++cc_binary(
++    name = "resident_metadata_replay",
++    srcs = ["metadata/ResidentReplayMain.cc"],
++    copts = copts(),
++    deps = [":metadata_replay_lib", "@rapidjson", "//rtp_llm/cpp/utils:core_utils"],
++)
+diff --git a/rtp_llm/cpp/cache/block_tree_cache/block_pool/DeviceBlockPool.cc b/rtp_llm/cpp/cache/block_tree_cache/block_pool/DeviceBlockPool.cc
+index a3c0b80e0..11a711678 100644
+--- a/rtp_llm/cpp/cache/block_tree_cache/block_pool/DeviceBlockPool.cc
++++ b/rtp_llm/cpp/cache/block_tree_cache/block_pool/DeviceBlockPool.cc
+@@ -114,8 +114,8 @@ void DeviceBlockPool::incRef(const BlockIdList& blocks, DeviceBlockRefType ref_t
+         blocks,
+         [](BlockIdxType) {},
+         [this, type_index](BlockIdxType block) {
+-            const bool was_active     = isActiveNoLock(block);
+-            const bool was_available  = isAvailableNoLock(block);
++            const bool was_active    = isActiveNoLock(block);
++            const bool was_available = isAvailableNoLock(block);
+             ++refcounts_[block];
+             if (refcounts_by_type_[type_index][block]++ == 0) {
+                 ++referenced_block_counts_[type_index];
+@@ -246,8 +246,8 @@ bool DeviceBlockPool::tryReplaceRequestReferences(const std::vector<RequestRefer
+             capacity_increased |= !was_available && isAvailableNoLock(block);
+         }
+         for (const auto block : *fresh_blocks) {
+-            const bool was_active = isActiveNoLock(block);
+-            refcounts_[block]     = 1;
++            const bool was_active                                                       = isActiveNoLock(block);
++            refcounts_[block]                                                           = 1;
+             refcounts_by_type_[static_cast<size_t>(DeviceBlockRefType::REQUEST)][block] = 1;
+             ++referenced_block_counts_[static_cast<size_t>(DeviceBlockRefType::REQUEST)];
+             updateActiveBlocksNumNoLock(block, was_active);
+@@ -365,7 +365,7 @@ const DeviceBlockPoolConfig& DeviceBlockPool::config() const {
+ }
+ 
+ void DeviceBlockPool::initializeCacheBuffer() {
+-    const auto& cfg = config();
++    const auto& cfg                   = config();
+     allocation_size_bytes_            = 0;
+     uses_dedicated_device_allocation_ = false;
+     RTP_LLM_CHECK_WITH_INFO(
+@@ -379,7 +379,7 @@ void DeviceBlockPool::initializeCacheBuffer() {
+     } else if (cfg.use_device_malloc_backing) {
+         initializeDeviceMallocBuffer();
+     } else {
+-        cache_aligned_buffer_ = torch::empty({static_cast<int64_t>(cfg.total_size_bytes)},
++        cache_aligned_buffer_  = torch::empty({static_cast<int64_t>(cfg.total_size_bytes)},
+                                              torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
+         allocation_size_bytes_ = cfg.total_size_bytes;
+     }
+@@ -445,9 +445,8 @@ void DeviceBlockPool::initializeDeviceMallocBuffer() {
+ 
+     const long page_size = sysconf(_SC_PAGESIZE);
+     RTP_LLM_CHECK_WITH_INFO(page_size > 0, "failed to query host page size for GDR allocation");
+-    const size_t allocation_size =
+-        (cfg.total_size_bytes + static_cast<size_t>(page_size) - 1) / static_cast<size_t>(page_size)
+-        * static_cast<size_t>(page_size);
++    const size_t allocation_size = (cfg.total_size_bytes + static_cast<size_t>(page_size) - 1)
++                                   / static_cast<size_t>(page_size) * static_cast<size_t>(page_size);
+     void*      ptr = nullptr;
+     const auto err = cudaMalloc(&ptr, allocation_size);
+     RTP_LLM_CHECK_WITH_INFO(err == cudaSuccess,
+@@ -475,7 +474,7 @@ void DeviceBlockPool::initializeDeviceMallocBuffer() {
+                          {static_cast<int64_t>(cfg.total_size_bytes)},
+                          std::move(deleter),
+                          torch::TensorOptions().dtype(torch::kUInt8).device(torch::Device(torch::kCUDA, device_id)));
+-    allocation_size_bytes_ = allocation_size;
++    allocation_size_bytes_            = allocation_size;
+     uses_dedicated_device_allocation_ = true;
+     RTP_LLM_LOG_INFO("cudaMalloc block pool backing allocated, pool_name=%s, ptr=%p, logical_size=%zu bytes, "
+                      "allocation_size=%zu bytes, device=%d",
+@@ -521,7 +520,7 @@ void DeviceBlockPool::initializeDeviceMallocBuffer() {
+                          {static_cast<int64_t>(cfg.total_size_bytes)},
+                          std::move(deleter),
+                          torch::TensorOptions().dtype(torch::kUInt8).device(torch::Device(torch::kCUDA, device_id)));
+-    allocation_size_bytes_ = cfg.total_size_bytes;
++    allocation_size_bytes_            = cfg.total_size_bytes;
+     uses_dedicated_device_allocation_ = true;
+     RTP_LLM_LOG_INFO("hipMalloc block pool backing allocated, pool_name=%s, ptr=%p, total_size=%zu bytes, device=%d",
+                      cfg.pool_name.c_str(),
+@@ -644,9 +643,11 @@ bool DeviceBlockPool::init() {
+     RTP_LLM_CHECK(!initialized());
+     const auto& cfg = config();
+ 
+-    initializeCacheBuffer();
+-    initializeLayerMappings();
+-    initializeLayoutStrategies();
++    if (!cfg.metadata_only) {
++        initializeCacheBuffer();
++        initializeLayerMappings();
++        initializeLayoutStrategies();
++    }
+ 
+     markInitialized();
+ 
+@@ -661,6 +662,7 @@ bool DeviceBlockPool::init() {
+ }
+ 
+ void DeviceBlockPool::regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store) {
++    RTP_LLM_CHECK_WITH_INFO(!config().metadata_only, "metadata-only pool has no registerable KV backing");
+     if (cache_store) {
+         cache_store_ = std::move(cache_store);
+     }
+@@ -768,14 +770,17 @@ std::pair<int, int> DeviceBlockPool::mapGlobalLayerIdToLocal(int global_layer_id
+ }
+ 
+ std::vector<torch::Tensor> DeviceBlockPool::allLayerCacheBase() const {
++    RTP_LLM_CHECK_WITH_INFO(!config().metadata_only, "metadata-only pool has no KV payload");
+     return global_layer_kv_tensors_;
+ }
+ 
+ std::vector<torch::Tensor> DeviceBlockPool::allLayerScaleCacheBase() const {
++    RTP_LLM_CHECK_WITH_INFO(!config().metadata_only, "metadata-only pool has no KV payload");
+     return global_layer_kv_scale_tensors_;
+ }
+ 
+ BlockAddrInfo DeviceBlockPool::convertIndexToAddr(int layer_id, BlockIdxType block) const {
++    RTP_LLM_CHECK_WITH_INFO(!config().metadata_only, "metadata-only pool has no KV payload");
+     RTP_LLM_CHECK(initialized());
+     auto [layout_index, local_layer_id] = mapGlobalLayerIdToLocal(layer_id);
+     checkLayoutValidity(layout_index);
+@@ -783,6 +788,7 @@ BlockAddrInfo DeviceBlockPool::convertIndexToAddr(int layer_id, BlockIdxType blo
+ }
+ 
+ std::vector<BlockInfo> DeviceBlockPool::convertIndexToBuffer(int layer_id, BlockIdxType block) const {
++    RTP_LLM_CHECK_WITH_INFO(!config().metadata_only, "metadata-only pool has no KV payload");
+     RTP_LLM_CHECK(initialized());
+     auto [layout_index, local_layer_id] = mapGlobalLayerIdToLocal(layer_id);
+     checkLayoutValidity(layout_index);
+@@ -791,6 +797,7 @@ std::vector<BlockInfo> DeviceBlockPool::convertIndexToBuffer(int layer_id, Block
+ 
+ std::vector<BlockInfo>
+ DeviceBlockPool::convertIndexToBuffer(int layer_id, BlockIdxType block, int partition_count, int partition_id) const {
++    RTP_LLM_CHECK_WITH_INFO(!config().metadata_only, "metadata-only pool has no KV payload");
+     RTP_LLM_CHECK(initialized());
+     auto [layout_index, local_layer_id] = mapGlobalLayerIdToLocal(layer_id);
+     checkLayoutValidity(layout_index);
+@@ -799,6 +806,7 @@ DeviceBlockPool::convertIndexToBuffer(int layer_id, BlockIdxType block, int part
+ }
+ 
+ MemoryType DeviceBlockPool::where() const {
++    RTP_LLM_CHECK_WITH_INFO(!config().metadata_only, "metadata-only pool has no KV payload");
+     if (cache_aligned_buffer_.is_cuda()) {
+         return MemoryType::MEMORY_GPU;
+     }
+@@ -850,7 +858,7 @@ std::string DeviceBlockPool::debugString() const {
+         << ", remote_connector_ref_blocks="
+         << referenced_blocks[static_cast<size_t>(DeviceBlockRefType::REMOTE_CONNECTOR)]
+         << ", pd_connector_ref_blocks=" << referenced_blocks[static_cast<size_t>(DeviceBlockRefType::PD_CONNECTOR)]
+-        << ", where=" << memoryTypeName(where()) << "}";
++        << ", where=" << (config().metadata_only ? "METADATA_ONLY" : memoryTypeName(where())) << "}";
+     return oss.str();
+ }
+ 
+diff --git a/rtp_llm/cpp/cache/block_tree_cache/block_pool/DeviceBlockPool.h b/rtp_llm/cpp/cache/block_tree_cache/block_pool/DeviceBlockPool.h
+index 5f390f303..a46a1898d 100644
+--- a/rtp_llm/cpp/cache/block_tree_cache/block_pool/DeviceBlockPool.h
++++ b/rtp_llm/cpp/cache/block_tree_cache/block_pool/DeviceBlockPool.h
+@@ -102,6 +102,7 @@ public:
+     convertIndexToBuffer(int layer_id, BlockIdxType block, int partition_count, int partition_id) const;
+ 
+     void* getBaseAddress() const {
++        RTP_LLM_CHECK_WITH_INFO(!config().metadata_only, "metadata-only pool has no KV address");
+         return cache_base_ptr_;
+     }
+     bool usesDedicatedDeviceAllocation() const {
+@@ -166,7 +167,7 @@ private:
+ 
+ private:
+     static constexpr size_t                          kRefTypeCount = static_cast<size_t>(DeviceBlockRefType::COUNT);
+-    std::vector<uint32_t> refcounts_;
++    std::vector<uint32_t>                            refcounts_;
+     std::array<std::vector<uint32_t>, kRefTypeCount> refcounts_by_type_;
+     std::array<size_t, kRefTypeCount>                referenced_block_counts_{};
+ 
+diff --git a/rtp_llm/cpp/cache/block_tree_cache/block_pool/DiskBlockPool.cc b/rtp_llm/cpp/cache/block_tree_cache/block_pool/DiskBlockPool.cc
+index ca9a3a40a..70d94590a 100644
+--- a/rtp_llm/cpp/cache/block_tree_cache/block_pool/DiskBlockPool.cc
++++ b/rtp_llm/cpp/cache/block_tree_cache/block_pool/DiskBlockPool.cc
+@@ -87,6 +87,11 @@ bool BlockTreeDiskBlockPool::init() {
+     RTP_LLM_CHECK_WITH_INFO(
+         !cfg.work_dir.empty(), "disk block pool [%s] work_dir must not be empty", cfg.pool_name.c_str());
+ 
++    if (cfg.metadata_only) {
++        markInitialized();
++        return true;
++    }
++
+     std::string effective_dir = cfg.work_dir;
+     if (cfg.mount_guard != nullptr) {
+         effective_dir = cfg.mount_guard->workDir();
+@@ -114,6 +119,7 @@ bool BlockTreeDiskBlockPool::init() {
+ 
+ BlockIOStatus BlockTreeDiskBlockPool::read(BlockIdxType block, void* dst, size_t bytes) {
+     RTP_LLM_CHECK(initialized());
++    RTP_LLM_CHECK_WITH_INFO(!config().metadata_only, "metadata-only pool forbids payload IO");
+     if (!validBlock(block)) {
+         return BlockIOStatus::INVALID_BLOCK;
+     }
+@@ -129,6 +135,7 @@ BlockIOStatus BlockTreeDiskBlockPool::read(BlockIdxType block, void* dst, size_t
+ 
+ BlockIOStatus BlockTreeDiskBlockPool::write(BlockIdxType block, const void* src, size_t bytes) {
+     RTP_LLM_CHECK(initialized());
++    RTP_LLM_CHECK_WITH_INFO(!config().metadata_only, "metadata-only pool forbids payload IO");
+     if (!validBlock(block)) {
+         return BlockIOStatus::INVALID_BLOCK;
+     }
+@@ -145,6 +152,7 @@ BlockIOStatus BlockTreeDiskBlockPool::write(BlockIdxType block, const void* src,
+ BlockIOStatus
+ BlockTreeDiskBlockPool::read(const BlockIdList& blocks, const std::vector<void*>& dsts, size_t bytes_per_block) {
+     RTP_LLM_CHECK(initialized());
++    RTP_LLM_CHECK_WITH_INFO(!config().metadata_only, "metadata-only pool forbids payload IO");
+     RTP_LLM_CHECK_WITH_INFO(blocks.size() == dsts.size(),
+                             "disk block pool [%s] batch read blocks/dsts size mismatch, blocks=[%zu] dsts=[%zu]",
+                             poolName().c_str(),
+@@ -174,6 +182,7 @@ BlockTreeDiskBlockPool::read(const BlockIdList& blocks, const std::vector<void*>
+ BlockIOStatus
+ BlockTreeDiskBlockPool::write(const BlockIdList& blocks, const std::vector<const void*>& srcs, size_t bytes_per_block) {
+     RTP_LLM_CHECK(initialized());
++    RTP_LLM_CHECK_WITH_INFO(!config().metadata_only, "metadata-only pool forbids payload IO");
+     RTP_LLM_CHECK_WITH_INFO(blocks.size() == srcs.size(),
+                             "disk block pool [%s] batch write blocks/srcs size mismatch, blocks=[%zu] srcs=[%zu]",
+                             poolName().c_str(),
+diff --git a/rtp_llm/cpp/cache/block_tree_cache/block_pool/HostBlockPool.cc b/rtp_llm/cpp/cache/block_tree_cache/block_pool/HostBlockPool.cc
+index e89df8dea..737f2e04f 100644
+--- a/rtp_llm/cpp/cache/block_tree_cache/block_pool/HostBlockPool.cc
++++ b/rtp_llm/cpp/cache/block_tree_cache/block_pool/HostBlockPool.cc
+@@ -100,6 +100,11 @@ bool HostBlockPool::init() {
+                             cfg.stride_bytes,
+                             cfg.alignment);
+ 
++    if (cfg.metadata_only) {
++        markInitialized();
++        return true;
++    }
++
+     // block 0's slot is allocated as backing but is never handed out by malloc().
+     RTP_LLM_CHECK_WITH_INFO(cfg.physical_block_count <= std::numeric_limits<size_t>::max() / cfg.stride_bytes,
+                             "host block pool [%s] backing size overflow",
+@@ -123,6 +128,7 @@ bool HostBlockPool::init() {
+ }
+ 
+ HostBlockBuffer HostBlockPool::blockBuffer(BlockIdxType block) const {
++    RTP_LLM_CHECK_WITH_INFO(!config().metadata_only, "metadata-only pool has no KV address");
+     RTP_LLM_CHECK(initialized());
+     RTP_LLM_CHECK(validBlock(block));
+     const auto& cfg  = config();
+diff --git a/rtp_llm/cpp/cache/block_tree_cache/block_pool/HostBlockPool.h b/rtp_llm/cpp/cache/block_tree_cache/block_pool/HostBlockPool.h
+index 142b722b2..20103ddf2 100644
+--- a/rtp_llm/cpp/cache/block_tree_cache/block_pool/HostBlockPool.h
++++ b/rtp_llm/cpp/cache/block_tree_cache/block_pool/HostBlockPool.h
+@@ -40,6 +40,9 @@ public:
+     // the pool is not initialized or the block index is out of range.
+     HostBlockBuffer blockBuffer(BlockIdxType block) const;
+ 
++    size_t allocatedPayloadBytes() const {
++        return backing_ ? config().physical_block_count * strideBytes() : 0;
++    }
+     size_t payloadBytes() const;
+     size_t strideBytes() const;
+     size_t blockSizeBytes() const override;
+diff --git a/rtp_llm/cpp/cache/block_tree_cache/block_pool/IBlockPool.h b/rtp_llm/cpp/cache/block_tree_cache/block_pool/IBlockPool.h
+index 20a3ca018..cebeb1add 100644
+--- a/rtp_llm/cpp/cache/block_tree_cache/block_pool/IBlockPool.h
++++ b/rtp_llm/cpp/cache/block_tree_cache/block_pool/IBlockPool.h
+@@ -42,6 +42,8 @@ struct BlockPoolConfigBase {
+     BlockPoolType pool_type{BlockPoolType::DEVICE};
+     std::string   pool_name;
+     size_t        physical_block_count{0};
++    // Offline metadata replay: retain capacity/refcounts without KV payload backing.
++    bool metadata_only{false};
+ };
+ 
+ // IBlockPool owns allocation and Tree-internal lifetime shared by Device, Host, and Disk.
+@@ -52,6 +54,9 @@ public:
+ 
+     void setCapacityChangeCallback(std::function<void()> callback);
+ 
++    bool metadataOnly() const {
++        return config_->metadata_only;
++    }
+     const std::string&  poolName() const;
+     virtual std::string debugString() const;
+     virtual size_t      blockSizeBytes() const = 0;
+diff --git a/rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.cc b/rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.cc
+index 2c1ea4293..d18e0249c 100644
+--- a/rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.cc
++++ b/rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.cc
+@@ -25,6 +25,18 @@ BlockTransferDispatcher::BlockTransferDispatcher(std::shared_ptr<PerRankBlockTra
+     RTP_LLM_CHECK(max_descriptors_per_batch_ > 0);
+ }
+ 
++BlockTransferDispatcher::BlockTransferDispatcher(WithSubmitter, Submitter submitter, size_t max_descriptors_per_batch):
++    submitter_(std::move(submitter)), max_descriptors_per_batch_(max_descriptors_per_batch) {
++    RTP_LLM_CHECK(submitter_ && max_descriptors_per_batch_ > 0);
++}
++
++bool BlockTransferDispatcher::hasPendingTransfers() const {
++    std::lock_guard<std::mutex> lock(completion_mutex_);
++    return std::any_of(transfer_completions_.begin(), transfer_completions_.end(), [](const auto& future) {
++        return future.wait_for(std::chrono::seconds(0)) != std::future_status::ready;
++    });
++}
++
+ BlockTransferDispatcher::~BlockTransferDispatcher() {
+     drainTransfers();
+ }
+@@ -58,6 +70,9 @@ std::shared_ptr<TransferAsyncContext> BlockTransferDispatcher::executePerRank(Tr
+                            CacheCopyError::NOT_EXECUTED),
+             task.descriptors().size());
+     }
++    if (submitter_)
++        return submitter_(std::move(task));
++    RTP_LLM_CHECK(per_rank_engine_ != nullptr);
+     return per_rank_engine_->execute(std::move(task));
+ }
+ 
+@@ -75,28 +90,30 @@ void BlockTransferDispatcher::runTransfer(TransferTask         task,
+     auto completion = std::make_shared<std::promise<void>>();
+     {
+         std::lock_guard<std::mutex> lock(completion_mutex_);
+-        transfer_completions_.erase(
+-            std::remove_if(transfer_completions_.begin(), transfer_completions_.end(), [](const auto& future) {
+-                return future.wait_for(std::chrono::seconds(0)) == std::future_status::ready;
+-            }),
+-            transfer_completions_.end());
++        transfer_completions_.erase(std::remove_if(transfer_completions_.begin(),
++                                                   transfer_completions_.end(),
++                                                   [](const auto& future) {
++                                                       return future.wait_for(std::chrono::seconds(0))
++                                                              == std::future_status::ready;
++                                                   }),
++                                    transfer_completions_.end());
+         transfer_completions_.push_back(completion->get_future().share());
+     }
+-    callback =
+-        [completion, block_count = task.descriptors().size(), done = std::move(callback)](TransferResult result) {
+-            result.expandBlockErrors(block_count);
+-            // Context readiness can precede callback execution. Drain only after
+-            // the callback has submitted settlement (also on an exception).
+-            block_tree_cache_detail::ScopeRollback completed([&] { completion->set_value(); });
+-            if (!result.ok()) {
+-                RTP_LLM_LOG_ERROR("block transfer failed: descriptor_count=%zu, error_type=%s, error_code=%d, details=%s",
+-                                  block_count,
+-                                  cacheCopyErrorName(result.copy_error),
+-                                  static_cast<int>(result.status.code()),
+-                                  result.status.ToString().c_str());
+-            }
+-            done(std::move(result));
+-        };
++    callback = [completion, block_count = task.descriptors().size(), done = std::move(callback)](
++                   TransferResult result) {
++        result.expandBlockErrors(block_count);
++        // Context readiness can precede callback execution. Drain only after
++        // the callback has submitted settlement (also on an exception).
++        block_tree_cache_detail::ScopeRollback completed([&] { completion->set_value(); });
++        if (!result.ok()) {
++            RTP_LLM_LOG_ERROR("block transfer failed: descriptor_count=%zu, error_type=%s, error_code=%d, details=%s",
++                              block_count,
++                              cacheCopyErrorName(result.copy_error),
++                              static_cast<int>(result.status.code()),
++                              result.status.ToString().c_str());
++        }
++        done(std::move(result));
++    };
+     const auto& descriptors = task.descriptors();
+     if (descriptors.empty()) {
+         callback(ErrorInfo(ErrorCode::INVALID_PARAMS, "transfer task contains no descriptors"));
+@@ -162,11 +179,12 @@ void BlockTransferDispatcher::runTransfer(TransferTask         task,
+ }
+ 
+ void BlockTransferDispatcher::cancelPendingStagingTransfers() const {
+-    per_rank_engine_->cancelPendingStagingTransfers();
++    if (per_rank_engine_)
++        per_rank_engine_->cancelPendingStagingTransfers();
+ }
+ 
+ BlockTreeQueueSizes BlockTransferDispatcher::queueSizes() const {
+-    return per_rank_engine_->queueSizes();
++    return per_rank_engine_ ? per_rank_engine_->queueSizes() : BlockTreeQueueSizes{};
+ }
+ 
+ }  // namespace rtp_llm
+diff --git a/rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h b/rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h
+index 1620698ea..fd191e4c7 100644
+--- a/rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h
++++ b/rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h
+@@ -21,8 +21,13 @@ public:
+     using TransferDoneCallback = std::function<void(TransferResult)>;
+ 
+     BlockTransferDispatcher(std::shared_ptr<PerRankBlockTransferEngine>   per_rank_engine,
+-                            std::shared_ptr<MultiRankBlockTransferEngine> multi_rank_engine = nullptr,
++                            std::shared_ptr<MultiRankBlockTransferEngine> multi_rank_engine         = nullptr,
+                             size_t                                        max_descriptors_per_batch = 8);
++    // Inject an executor without constructing physical transfer engines.
++    using Submitter = std::function<std::shared_ptr<TransferAsyncContext>(TransferTask)>;
++    struct WithSubmitter {};
++    BlockTransferDispatcher(WithSubmitter, Submitter submitter, size_t max_descriptors_per_batch = 8);
++    bool hasPendingTransfers() const;
+     ~BlockTransferDispatcher();
+ 
+     std::shared_ptr<TransferAsyncContext> executePerRank(TransferTask task) const;
+@@ -46,9 +51,10 @@ private:
+ 
+     std::shared_ptr<PerRankBlockTransferEngine>   per_rank_engine_;
+     std::shared_ptr<MultiRankBlockTransferEngine> multi_rank_engine_;
++    Submitter                                     submitter_;
+     size_t                                        max_descriptors_per_batch_{8};
+     mutable std::mutex                            completion_mutex_;
+-    mutable std::vector<std::shared_future<void>>  transfer_completions_;
++    mutable std::vector<std::shared_future<void>> transfer_completions_;
+     std::function<void()>                         drain_observer_for_test_;
+ };
+ 
+diff --git a/rtp_llm/cpp/engine_base/stream/CompleteTokenIds.cc b/rtp_llm/cpp/engine_base/stream/CompleteTokenIds.cc
+index 078896a30..d414b8117 100644
+--- a/rtp_llm/cpp/engine_base/stream/CompleteTokenIds.cc
++++ b/rtp_llm/cpp/engine_base/stream/CompleteTokenIds.cc
+@@ -59,6 +59,13 @@ void CompleteTokenIds::init(const std::shared_ptr<GenerateInput>& generate_input
+     RTP_LLM_LOG_DEBUG("complete tokenids init done, %s", showStatus(0).c_str());
+ }
+ 
++void CompleteTokenIds::initCacheMetadata(int input_length) {
++    RTP_LLM_CHECK(batch_size_ == 1 && max_batch_size_ == 1 && input_length > 0 && input_length <= max_seq_len_);
++    RTP_LLM_CHECK(!complete_token_ids_.defined());
++    seq_length_ = common_len_ = start_check_seq_length_ = input_length;
++    reserve_step_                                       = 0;
++}
++
+ std::vector<int32_t> CompleteTokenIds::multimodalCacheIdentity(int begin, int count) const {
+     std::vector<int32_t> result;
+     if (!multimodal_cache_spans_ || count <= 0) {
+diff --git a/rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h b/rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h
+index 0e4dba2d5..c3301a33e 100644
+--- a/rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h
++++ b/rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h
+@@ -13,6 +13,8 @@ public:
+ 
+ public:
+     void init(const std::shared_ptr<GenerateInput>& generate_input, size_t extra_reserve_token_num = 0);
++    // Length-only pure-text cache view: token access remains unavailable.
++    void initCacheMetadata(int input_length);
+ 
+     std::vector<int> completeTokenIdsVec(int batch_id);
+     std::vector<int> commonCompleteTokenIdsVec(int batch_id);
+diff --git a/rtp_llm/cpp/cache/block_tree_cache/BlockTreeGroupLayout.h b/rtp_llm/cpp/cache/block_tree_cache/BlockTreeGroupLayout.h
+new file mode 100644
+index 000000000..fc4b366bd
+--- /dev/null
++++ b/rtp_llm/cpp/cache/block_tree_cache/BlockTreeGroupLayout.h
+@@ -0,0 +1,90 @@
++#pragma once
++#include <algorithm>
++#include <limits>
++#include "rtp_llm/cpp/cache/CacheConfig.h"
++
++namespace rtp_llm::block_tree_layout {
++
++inline int slidingWindowSize(const GroupBase& group) {
++    RTP_LLM_CHECK_WITH_INFO(group.policy.group_type == CacheGroupType::SWA,
++                            "sliding window requested for non-SWA tag=%s",
++                            group.tag.c_str());
++    RTP_LLM_CHECK_WITH_INFO(group.spec != nullptr, "SWA tag=%s has null cache spec", group.tag.c_str());
++    RTP_LLM_CHECK_WITH_INFO(group.policy.sliding_window_size >= 0,
++                            "SWA tag=%s has invalid sliding window=%d",
++                            group.tag.c_str(),
++                            group.policy.sliding_window_size);
++    return group.policy.sliding_window_size;
++}
++
++inline bool
++groupSetSemanticsCompatible(const CacheConfig& cache_config, std::string_view lhs_tag, std::string_view rhs_tag) {
++    const GroupBase& lhs = cache_config.topology().group(lhs_tag);
++    const GroupBase& rhs = cache_config.topology().group(rhs_tag);
++    if (lhs.policy.group_type != rhs.policy.group_type || lhs.seqSizePerBlock() != rhs.seqSizePerBlock()
++        || lhs.policy.cp_mapping != rhs.policy.cp_mapping) {
++        return false;
++    }
++    if (lhs.policy.group_type == CacheGroupType::SWA) {
++        if (slidingWindowSize(lhs) != slidingWindowSize(rhs)) {
++            return false;
++        }
++    }
++    if (lhs.policy.group_type == CacheGroupType::SWA || lhs.policy.group_type == CacheGroupType::LINEAR) {
++        if (lhs.policy.active_tail_blocks != rhs.policy.active_tail_blocks) {
++            return false;
++        }
++    }
++    return true;
++}
++
++inline bool buildGroupMembers(const CacheConfig& cache_config, std::vector<std::vector<std::string>>& group_members) {
++    group_members.clear();
++    for (const GroupBase& group : cache_config.topology().groups()) {
++        if (!group.policy.enable_prefix_reuse) {
++            continue;
++        }
++
++        const CacheGroupType group_type = group.policy.group_type;
++        if (group_type != CacheGroupType::FULL && group_type != CacheGroupType::SWA
++            && group_type != CacheGroupType::LINEAR) {
++            RTP_LLM_LOG_ERROR("unsupported reusable cache group type for tag=%s", group.tag.c_str());
++            return false;
++        }
++
++        auto it =
++            std::find_if(group_members.begin(), group_members.end(), [&](const std::vector<std::string>& members) {
++                const GroupBase& first = cache_config.topology().group(members.front());
++                return first.policy.group_type == group.policy.group_type;
++            });
++        if (it == group_members.end()) {
++            group_members.push_back({group.tag});
++        } else {
++            if (!groupSetSemanticsCompatible(cache_config, it->front(), group.tag)) {
++                RTP_LLM_LOG_ERROR("incompatible BlockTree reuse coordinates for tags=%s and %s",
++                                  it->front().c_str(),
++                                  group.tag.c_str());
++                return false;
++            }
++            it->push_back(group.tag);
++        }
++    }
++    return true;
++}
++
++inline std::shared_ptr<const CacheTopology> projectCacheKeys(const CacheConfig& cache_config, size_t cp_size) {
++    auto cache_topology = cache_config.topologyPtr();
++    if (cp_size > 1) {
++        auto groups = cache_topology->groups();
++        RTP_LLM_CHECK_WITH_INFO(cache_config.seq_size_per_block <= std::numeric_limits<size_t>::max() / cp_size,
++                                "canonical CP cache key stride overflow");
++        for (auto& group : groups) {
++            auto spec                    = group.spec->clone();
++            spec->cache_key_token_stride = cache_config.seq_size_per_block * cp_size;
++            group.spec                   = std::move(spec);
++        }
++        cache_topology = CacheTopology::create(std::move(groups), cache_topology->layers());
++    }
++    return cache_topology;
++}
++}  // namespace rtp_llm::block_tree_layout
+diff --git a/rtp_llm/cpp/cache/block_tree_cache/benchmark/metadata/Dsv41Profile.h b/rtp_llm/cpp/cache/block_tree_cache/benchmark/metadata/Dsv41Profile.h
+new file mode 100644
+index 000000000..cdd5110d0
+--- /dev/null
++++ b/rtp_llm/cpp/cache/block_tree_cache/benchmark/metadata/Dsv41Profile.h
+@@ -0,0 +1,117 @@
++// Generated by export_dsv41_profile.py from model-config.json SHA256
++// 8be45ce0476004a3f529fd896115a4a2e800a129ad2d3ec05b16050f52e21879
++#pragma once
++#include "rtp_llm/cpp/cache/KVCacheSpecDesc.h"
++#include <vector>
++namespace rtp_llm::benchmark::dsv41 {
++constexpr int                       kWindow         = 128;
++constexpr int                       kDraftBlockSize = 5;
++inline std::vector<KVCacheSpecDesc> descriptors() {
++    KVCacheSpecDesc swa_kv;
++    swa_kv.tag                                  = "swa_kv";
++    swa_kv.cache_type                           = KVCacheSpecType::OpaqueState;
++    swa_kv.dtype                                = DataType::TYPE_UINT8;
++    swa_kv.entry_dtype                          = DataType::TYPE_UINT8;
++    swa_kv.entry_count_mode                     = OpaqueBlockEntryCountMode::STATE_RING;
++    swa_kv.entry_elems                          = 528;
++    swa_kv.compression_ratio                    = 128;
++    swa_kv.is_state_cache                       = true;
++    swa_kv.state_ring_include_gen_num_per_cycle = true;
++    swa_kv.block_stride_alignment_min_entries   = 128;
++    swa_kv.block_stride_bytes_alignment         = 16896;
++    swa_kv.cp                                   = CacheCpPolicyDesc{};
++    swa_kv.cp->align_payload                    = true;
++    swa_kv.cp->scale_seq_size                   = true;
++    swa_kv.cp->prefill_slice_layout             = CpPrefillSliceLayout::BLOCK_STRIDE;
++    swa_kv.cp->slice                            = CpBlockSliceMode::EQUAL_BYTES;
++    KVCacheSpecDesc csa_kv;
++    csa_kv.tag                          = "csa_kv";
++    csa_kv.cache_type                   = KVCacheSpecType::OpaqueKV;
++    csa_kv.dtype                        = DataType::TYPE_UINT8;
++    csa_kv.entry_dtype                  = DataType::TYPE_UINT8;
++    csa_kv.entry_count_mode             = OpaqueBlockEntryCountMode::KERNEL_BLOCK_COMPRESSED;
++    csa_kv.entry_elems                  = 288;
++    csa_kv.compression_ratio            = 2;
++    csa_kv.block_stride_bytes_alignment = 4608;
++    KVCacheSpecDesc indexer_kv;
++    indexer_kv.tag               = "indexer_kv";
++    indexer_kv.cache_type        = KVCacheSpecType::OpaqueKV;
++    indexer_kv.dtype             = DataType::TYPE_UINT8;
++    indexer_kv.entry_dtype       = DataType::TYPE_UINT8;
++    indexer_kv.entry_count_mode  = OpaqueBlockEntryCountMode::KERNEL_BLOCK_COMPRESSED;
++    indexer_kv.entry_elems       = 68;
++    indexer_kv.compression_ratio = 1;
++    KVCacheSpecDesc csa_state;
++    csa_state.tag                                  = "csa_state";
++    csa_state.cache_type                           = KVCacheSpecType::OpaqueState;
++    csa_state.dtype                                = DataType::TYPE_FP32;
++    csa_state.entry_dtype                          = DataType::TYPE_FP32;
++    csa_state.entry_count_mode                     = OpaqueBlockEntryCountMode::STATE_RING;
++    csa_state.entry_elems                          = 1024;
++    csa_state.compression_ratio                    = 2;
++    csa_state.is_state_cache                       = true;
++    csa_state.state_ring_include_gen_num_per_cycle = true;
++    csa_state.block_stride_alignment_min_entries   = 128;
++    csa_state.cp                                   = CacheCpPolicyDesc{};
++    csa_state.cp->align_payload                    = true;
++    csa_state.cp->scale_seq_size                   = true;
++    csa_state.cp->prefill_slice_layout             = CpPrefillSliceLayout::PAYLOAD;
++    csa_state.cp->slice                            = CpBlockSliceMode::PAYLOAD_BYTES;
++    KVCacheSpecDesc hca_kv;
++    hca_kv.tag                          = "hca_kv";
++    hca_kv.cache_type                   = KVCacheSpecType::OpaqueKV;
++    hca_kv.dtype                        = DataType::TYPE_UINT8;
++    hca_kv.entry_dtype                  = DataType::TYPE_UINT8;
++    hca_kv.entry_count_mode             = OpaqueBlockEntryCountMode::KERNEL_BLOCK_COMPRESSED;
++    hca_kv.entry_elems                  = 288;
++    hca_kv.compression_ratio            = 1;
++    hca_kv.block_stride_bytes_alignment = 4608;
++    KVCacheSpecDesc decoder_swa_kv;
++    decoder_swa_kv.tag                                  = "decoder_swa_kv";
++    decoder_swa_kv.cache_type                           = KVCacheSpecType::OpaqueState;
++    decoder_swa_kv.dtype                                = DataType::TYPE_UINT8;
++    decoder_swa_kv.entry_dtype                          = DataType::TYPE_UINT8;
++    decoder_swa_kv.entry_count_mode                     = OpaqueBlockEntryCountMode::STATE_RING;
++    decoder_swa_kv.entry_elems                          = 528;
++    decoder_swa_kv.compression_ratio                    = 128;
++    decoder_swa_kv.is_state_cache                       = true;
++    decoder_swa_kv.state_ring_include_gen_num_per_cycle = true;
++    decoder_swa_kv.block_stride_alignment_min_entries   = 128;
++    decoder_swa_kv.block_stride_bytes_alignment         = 16896;
++    decoder_swa_kv.cp                                   = CacheCpPolicyDesc{};
++    decoder_swa_kv.cp->align_payload                    = true;
++    decoder_swa_kv.cp->scale_seq_size                   = true;
++    decoder_swa_kv.cp->prefill_slice_layout             = CpPrefillSliceLayout::BLOCK_STRIDE;
++    decoder_swa_kv.cp->slice                            = CpBlockSliceMode::EQUAL_BYTES;
++    decoder_swa_kv.reuse                                = CacheReusePolicyDesc{false};
++    decoder_swa_kv.capacity                             = CacheCapacityPolicyDesc{};
++    decoder_swa_kv.capacity->explicit_block_num         = 1024;
++    decoder_swa_kv.capacity->charge_to_paged_budget     = true;
++    return {swa_kv, csa_kv, indexer_kv, csa_state, hca_kv, decoder_swa_kv};
++}
++inline std::vector<std::vector<std::string>> targetLayers() {
++    return {
++        {"swa_kv"},         {"swa_kv"},         {"swa_kv", "csa_kv", "indexer_kv", "csa_state"},
++        {"swa_kv"},         {"swa_kv"},         {"swa_kv"},
++        {"swa_kv"},         {"swa_kv"},         {"swa_kv", "csa_kv", "indexer_kv", "csa_state"},
++        {"swa_kv"},         {"swa_kv"},         {"swa_kv"},
++        {"swa_kv"},         {"swa_kv"},         {"swa_kv", "csa_kv", "indexer_kv", "csa_state"},
++        {"swa_kv"},         {"swa_kv"},         {"swa_kv"},
++        {"swa_kv"},         {"swa_kv"},         {"swa_kv", "hca_kv", "indexer_kv"},
++        {"decoder_swa_kv"}, {"decoder_swa_kv"}, {"decoder_swa_kv"},
++        {"decoder_swa_kv"}, {"decoder_swa_kv"}, {"decoder_swa_kv"},
++        {"decoder_swa_kv"}, {"decoder_swa_kv"}, {"decoder_swa_kv"},
++        {"decoder_swa_kv"}, {"decoder_swa_kv"}, {"decoder_swa_kv"},
++        {"decoder_swa_kv"}, {"decoder_swa_kv"}, {"decoder_swa_kv"},
++        {"decoder_swa_kv"}, {"decoder_swa_kv"}, {"decoder_swa_kv"},
++        {"decoder_swa_kv"},
++    };
++}
++inline std::vector<std::vector<std::string>> draftLayers() {
++    return {
++        {"decoder_swa_kv"},
++        {"decoder_swa_kv"},
++        {"decoder_swa_kv"},
++    };
++}
++}  // namespace rtp_llm::benchmark::dsv41
+diff --git a/rtp_llm/cpp/cache/block_tree_cache/benchmark/metadata/MetadataPoolTest.cc b/rtp_llm/cpp/cache/block_tree_cache/benchmark/metadata/MetadataPoolTest.cc
+new file mode 100644
+index 000000000..5607c4182
+--- /dev/null
++++ b/rtp_llm/cpp/cache/block_tree_cache/benchmark/metadata/MetadataPoolTest.cc
+@@ -0,0 +1,101 @@
++#include <filesystem>
++#include <iostream>
++#include <stdexcept>
++#include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DeviceBlockPool.h"
++#include "rtp_llm/cpp/cache/block_tree_cache/block_pool/HostBlockPool.h"
++#include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DiskBlockPool.h"
++#include "rtp_llm/cpp/config/StaticConfig.h"
++using namespace rtp_llm;
++namespace {
++void require(bool value) {
++    if (!value)
++        throw std::runtime_error("metadata pool assertion failed");
++}
++template<class F>
++void rejects(F action) {
++    bool rejected = false;
++    try {
++        action();
++    } catch (const std::exception&) {
++        rejected = true;
++    }
++    require(rejected);
++}
++void checkTreeOwnership(IBlockPool& pool) {
++    require(pool.totalBlocksNum() == 16 && pool.freeBlocksNum() == 16);
++    auto ids = pool.malloc(16);
++    require(ids.has_value());
++    pool.incTreeRef(*ids, BlockTreeRefType::CACHE);
++    pool.incTreeRef(*ids, BlockTreeRefType::LOAD);
++    require(!pool.malloc().has_value());
++    require(!pool.canReclaimCacheBlock(ids->front()));
++    pool.decTreeRef(*ids, BlockTreeRefType::LOAD);
++    require(pool.canReclaimCacheBlock(ids->front()));
++    pool.decTreeRef(*ids, BlockTreeRefType::CACHE);
++    require(pool.freeBlocksNum() == 16 && pool.usedBlocksNum() == 0);
++}
++}  // namespace
++int main(int argc, char** argv) {
++    StaticConfig::user_ft_core_dump_on_exception = false;
++    require(argc == 2);
++    const std::filesystem::path disk_path = argv[1];
++    require(!std::filesystem::exists(disk_path));
++    constexpr size_t stride  = size_t{1} << 36;
++    auto             dc      = std::make_shared<DeviceBlockPoolConfig>();
++    dc->pool_type            = BlockPoolType::DEVICE;
++    dc->pool_name            = "metadata-device";
++    dc->metadata_only        = true;
++    dc->physical_block_count = 17;
++    dc->total_size_bytes     = 17 * stride;
++    MemoryLayoutConfig layout;
++    layout.layer_num                = 1;
++    layout.block_num                = 17;
++    layout.dtype                    = TYPE_INT8;
++    layout.kv_block_stride_bytes    = stride;
++    layout.kv_block_pool_size_bytes = 17 * stride;
++    layout.block_stride_bytes       = stride;
++    layout.total_size_bytes         = 17 * stride;
++    layout.seq_size_per_block       = 256;
++    dc->memory_layouts.push_back(layout);
++    DeviceBlockPool device(dc);
++    require(device.init());
++    require(device.getAllocationSizeBytes() == 0);
++    rejects([&] { device.getBaseAddress(); });
++    auto id = device.malloc();
++    require(id.has_value());
++    device.incRef(*id);
++    device.incTreeRef(*id, BlockTreeRefType::CACHE);
++    require(!device.canReclaimCacheBlock(*id));
++    device.decRef(*id);
++    require(device.canReclaimCacheBlock(*id));
++    device.decTreeRef(*id, BlockTreeRefType::CACHE);
++    checkTreeOwnership(device);
++    auto hc                  = std::make_shared<HostBlockPoolConfig>();
++    hc->pool_type            = BlockPoolType::HOST;
++    hc->pool_name            = "metadata-host";
++    hc->metadata_only        = true;
++    hc->physical_block_count = 17;
++    hc->payload_bytes        = stride;
++    hc->stride_bytes         = stride;
++    HostBlockPool host(hc);
++    require(host.init());
++    checkTreeOwnership(host);
++    rejects([&] { host.blockBuffer(1); });
++    auto kc                  = std::make_shared<BlockTreeDiskBlockPoolConfig>();
++    kc->pool_type            = BlockPoolType::DISK;
++    kc->pool_name            = "metadata-disk";
++    kc->metadata_only        = true;
++    kc->physical_block_count = 17;
++    kc->payload_bytes        = stride;
++    kc->stride_bytes         = stride;
++    kc->disk_size_bytes      = 17 * stride;
++    kc->work_dir             = disk_path.string();
++    BlockTreeDiskBlockPool disk(kc);
++    require(disk.init());
++    checkTreeOwnership(disk);
++    char data = 0;
++    rejects([&] { disk.read(1, &data, 1); });
++    rejects([&] { disk.write(1, &data, 1); });
++    require(disk.readBytes() == 0 && disk.writeBytes() == 0 && !std::filesystem::exists(disk_path));
++    std::cout << "PASS: metadata allocation/refcounts, no KV backing, forbidden payload access, no disk file\n";
++}
+diff --git a/rtp_llm/cpp/cache/block_tree_cache/benchmark/metadata/MetadataReplay.cc b/rtp_llm/cpp/cache/block_tree_cache/benchmark/metadata/MetadataReplay.cc
+new file mode 100644
+index 000000000..40228c12d
+--- /dev/null
++++ b/rtp_llm/cpp/cache/block_tree_cache/benchmark/metadata/MetadataReplay.cc
+@@ -0,0 +1,556 @@
++#include "rtp_llm/cpp/cache/block_tree_cache/benchmark/metadata/MetadataReplay.h"
++#include "rtp_llm/cpp/cache/block_tree_cache/benchmark/metadata/Dsv41Profile.h"
++#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeGroupLayout.h"
++#include <atomic>
++#include <chrono>
++#include <condition_variable>
++#include <mutex>
++#include <limits>
++#include <stdexcept>
++#include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
++#include "rtp_llm/cpp/cache/CPSlotMapper.h"
++#include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
++#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
++#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
++#include "rtp_llm/cpp/cache/block_tree_cache/benchmark/BenchmarkFixture.h"
++#include "rtp_llm/cpp/cache/block_tree_cache/block_pool/HostBlockPool.h"
++#include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DiskBlockPool.h"
++#include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
++#include "rtp_llm/cpp/cache/block_tree_cache/load/LoadAsyncContext.h"
++namespace rtp_llm::benchmark {
++uint64_t physicalCopyAttempts();
++namespace {
++using Clock = std::chrono::steady_clock;
++double micros(Clock::time_point begin) {
++    return std::chrono::duration<double, std::micro>(Clock::now() - begin).count();
++}
++void require(bool value, const char* message) {
++    if (!value)
++        throw std::runtime_error(message);
++}
++CacheConfig fixtureConfig(const MetadataReplayConfig& o) {
++    std::vector<std::pair<std::string, CacheGroupType>> specs = {{"full", CacheGroupType::FULL}};
++    std::vector<size_t>                                 bytes = {1024}, windows = {0};
++    if (o.swa) {
++        require(o.last_n && o.swa_blocks && o.sliding_window, "invalid SWA config");
++        specs.push_back({"swa", CacheGroupType::SWA});
++        bytes.push_back(1024);
++        windows.push_back(o.sliding_window);
++    }
++    auto topology = BenchmarkFixture::createTopology(specs, bytes, o.block_tokens, {}, windows);
++    auto groups   = topology->groups();
++    if (o.swa && o.cp_size > 1) {
++        require(o.swa_block_tokens == o.cp_size * o.block_tokens,
++                "compact SWA controller fixture requires an explicit virtual span");
++        groups.back().spec = BenchmarkFixture::createTopology(
++                                 {{"swa", CacheGroupType::SWA}}, {1024}, o.swa_block_tokens, {}, {o.sliding_window})
++                                 ->groups()
++                                 .front()
++                                 .spec;
++    } else if (o.swa)
++        require(o.swa_block_tokens == 0 || o.swa_block_tokens == o.block_tokens, "unexpected SWA span");
++    for (auto& g : groups) {
++        g.policy.enable_prefix_reuse = true;  // Explicit reusable FULL/SWA fixture configuration.
++        g.block_num = (g.policy.group_type == CacheGroupType::SWA ? o.swa_blocks : o.device_blocks) + 1;
++        if (g.policy.group_type == CacheGroupType::SWA)
++            g.policy.active_tail_blocks = o.last_n;
++    }
++    CacheConfig config;
++    config.metadata_only           = true;
++    config.dtype                   = TYPE_INT8;
++    config.layer_num               = groups.size();
++    config.seq_size_per_block      = o.block_tokens;
++    config.reuse_cache_tail_blocks = o.last_n;
++    config.cache_min_replay_tokens = o.min_replay_tokens;
++    config.setTopology(std::move(groups), topology->layers());
++    return config;
++}
++
++CacheConfig dsv41Config(const MetadataReplayConfig& o) {
++    require(
++        o.swa && o.block_tokens == 256 && o.cp_size == 4 && o.sliding_window == dsv41::kWindow
++            && (!o.swa_block_tokens || o.swa_block_tokens == o.block_tokens * o.cp_size) && o.min_replay_tokens == 128
++            && o.linear_step == 1 && o.swa_blocks <= o.device_blocks
++            && o.last_n > 0,
++        "DSv4.1 profile requires bounded replay, CP4, base/kernel 256, native SWA tail/step and equal device capacities");
++    ParallelismConfig parallel;
++    parallel.role_type                          = RoleType::PREFILL;
++    parallel.tp_size                            = o.cp_size;
++    parallel.tp_rank                            = o.cp_rank;
++    parallel.prefill_cp_config.kv_cache_sharded = true;
++    parallel.prefill_cp_config.prefill_cp_size  = o.cp_size;
++    parallel.prefill_cp_config.method           = CPRotateMethod::PREFILL_CP;
++    SpecBuildContext ctx;
++    ctx.seq_size_per_block      = o.block_tokens;
++    ctx.kernel_tokens_per_block = o.block_tokens;
++    ctx.parallelism_config      = &parallel;
++    // The historical byte audit matched all six live pool sizes with the model's five-token DSpark block.
++    ctx.gen_num_per_cycle = dsv41::kDraftBlockSize;
++
++    const auto prototypes = dsv41::descriptors();
++    auto       build      = [&](const std::vector<std::vector<std::string>>& tags) {
++        CacheConfig config;
++        config.metadata_only                            = true;
++        config.layer_num                                = tags.size();
++        config.seq_size_per_block                       = o.block_tokens;
++        config.cache_min_replay_tokens                  = o.min_replay_tokens;
++        config.cache_key_hash_seed                      = 0x4453563431494231LL;
++        config.use_typed_cache_regions                  = true;
++        config.use_opaque_kv_cache_store                = true;
++        config.disable_decode_first_malloc_device_reuse = true;
++        config.is_sparse                                = true;
++        config.dtype       = TYPE_BF16;  // Model dtype; opaque pools carry their own entry dtype.
++        config.reuse_cache_tail_blocks = o.last_n;
++        std::vector<GroupBase> groups;
++        std::vector<LayerBase> layers;
++        for (const auto& layer_tags : tags) {
++            layers.push_back({static_cast<int>(layers.size()), layer_tags});
++            for (const auto& tag : layer_tags) {
++                if (std::any_of(groups.begin(), groups.end(), [&](const auto& g) { return g.tag == tag; }))
++                    continue;
++                const auto desc =
++                    std::find_if(prototypes.begin(), prototypes.end(), [&](const auto& d) { return d.tag == tag; });
++                require(desc != prototypes.end(), "unresolved DSv4.1 descriptor");
++                auto policy = SpecBuilder::groupPolicy(*desc);
++                if (policy.group_type == CacheGroupType::SWA)
++                    policy.sliding_window_size = dsv41::kWindow;
++                if (policy.enable_prefix_reuse && policy.group_type == CacheGroupType::SWA)
++                    policy.explicit_block_num = o.swa_blocks + 1;
++                groups.push_back({tag, SpecBuilder::build(*desc, ctx), policy});
++            }
++        }
++        config.setTopology(std::move(groups), std::move(layers));
++        return config;
++    };
++    auto config = build(dsv41::targetLayers());
++    auto draft  = build(dsv41::draftLayers());
++    config.mtp_sub_configs.push_back(config.mergeMTPModule(draft, 0, config.layer_num));
++    config.finalizeBlockNums(o.device_blocks + 1, RuntimeConfig{});
++    for (const auto& group : config.topology().groups()) {
++        RTP_LLM_LOG_INFO(
++            "metadata DSv4.1 tag=%s type=%s layers=%zu prefix_reuse=%d usable_blocks=%u span=%zu bytes=%zu",
++            group.tag.c_str(),
++            cacheGroupTypeName(group.policy.group_type),
++            config.layerIdsForGroup(group.tag).size(),
++            group.policy.enable_prefix_reuse,
++            group.block_num - 1,
++            group.seqSizePerBlock(),
++            config.blockSizeBytesForGroup(group.tag));
++    }
++    return config;
++}
++
++class PendingTransfer final: public TransferAsyncContext {
++public:
++    void waitDone() override {
++        std::unique_lock<std::mutex> lock(mutex_);
++        cv_.wait(lock, [this] { return done_; });
++    }
++    void onDone(DoneCallback callback) override {
++        TransferResult result;
++        {
++            std::lock_guard<std::mutex> lock(mutex_);
++            if (!done_) {
++                callbacks_.push_back(std::move(callback));
++                return;
++            }
++            result = result_;
++        }
++        callback(result);
++    }
++    bool done() const override {
++        std::lock_guard<std::mutex> lock(mutex_);
++        return done_;
++    }
++    bool success() const override {
++        std::lock_guard<std::mutex> lock(mutex_);
++        return done_ && result_.ok();
++    }
++    TransferResult result() const override {
++        std::lock_guard<std::mutex> lock(mutex_);
++        return result_;
++    }
++    void finish(TransferResult result) {
++        std::vector<DoneCallback> callbacks;
++        {
++            std::lock_guard<std::mutex> lock(mutex_);
++            result_ = result;
++            done_   = true;
++            callbacks.swap(callbacks_);
++        }
++        cv_.notify_all();
++        for (auto& callback : callbacks)
++            callback(result);
++    }
++
++private:
++    mutable std::mutex        mutex_;
++    std::condition_variable   cv_;
++    bool                      done_{false};
++    TransferResult            result_;
++    std::vector<DoneCallback> callbacks_;
++};
++class MetadataCompletion {
++public:
++    explicit MetadataCompletion(std::vector<GroupSetPtr> groups):
++        groups_(std::move(groups)), tasks_(1, 10000, "MetadataCompletion") {
++        require(tasks_.start(), "completion queue init");
++    }
++    ~MetadataCompletion() {
++        tasks_.waitForIdle();
++    }
++    std::shared_ptr<TransferAsyncContext> execute(TransferTask task) {
++        auto result = std::make_shared<PendingTransfer>();
++        require(tasks_.submit(BlockTreeTaskClass::BACKGROUND,
++                              [this, task = std::move(task), result]() mutable {
++                                  TransferResult status(TransferStatus::OK);
++                                  try {
++                                      if (fail_next.exchange(false))
++                                          throw std::runtime_error("injected metadata transfer failure");
++                                      for (const auto& d : task.descriptors()) {
++                                          require(d.group_set_id < groups_.size(), "invalid transfer group");
++                                          validate(*groups_[d.group_set_id], d.source_tier, d.source_blocks);
++                                          validate(*groups_[d.group_set_id], d.target_tier, d.target_blocks);
++                                          if (d.source_tier == Tier::DEVICE && d.target_tier == Tier::HOST)
++                                              ++device_host;
++                                          if (d.source_tier == Tier::HOST && d.target_tier == Tier::DISK)
++                                              ++host_disk;
++                                          if (d.source_tier == Tier::HOST && d.target_tier == Tier::DEVICE)
++                                              ++host_device;
++                                          if (d.source_tier == Tier::DISK && d.target_tier == Tier::DEVICE)
++                                              ++disk_device;
++                                      }
++                                  } catch (const std::exception& error) {
++                                      status = TransferResult(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, error.what()));
++                                      ++failed;
++                                  }
++                                  ++transfers;
++                                  status.expandBlockErrors(task.descriptors().size());
++                                  result->finish(std::move(status));
++                              }),
++                "metadata completion submission failed");
++        return result;
++    }
++    void wait() {
++        tasks_.waitForIdle();
++    }
++    size_t pending() const {
++        return tasks_.pendingTaskCount();
++    }
++    std::atomic<bool>     fail_next{false};
++    std::atomic<uint64_t> transfers{0}, failed{0}, device_host{0}, host_disk{0}, host_device{0}, disk_device{0};
++
++private:
++    static void validate(const GroupSet& group, Tier tier, const BlockIndicesType& ids) {
++        if (tier == Tier::DEVICE) {
++            require(ids.size() == group.devicePools().size(), "device member count");
++            for (size_t i = 0; i < ids.size(); ++i)
++                require(group.devicePools()[i]->metadataOnly() && group.devicePools()[i]->isAllocated(ids[i]),
++                        "device resource not allocated");
++            return;
++        }
++        std::shared_ptr<IBlockPool> pool;
++        if (tier == Tier::HOST)
++            pool = group.hostPool();
++        else if (tier == Tier::DISK)
++            pool = group.diskPool();
++        require(pool && pool->metadataOnly() && ids.size() == 1 && pool->isAllocated(ids[0]),
++                "tier resource not allocated");
++    }
++    std::vector<GroupSetPtr> groups_;
++    BlockTreeTaskPool        tasks_;
++};
++}  // namespace
++MetadataReplayConfig::MetadataReplayConfig():
++    last_n(CacheConfig{}.reuse_cache_tail_blocks),
++    linear_step(1) {}
++
++struct MetadataReplay::Impl {
++    MetadataReplayConfig                     options;
++    CacheConfig                              config;
++    std::shared_ptr<CoordinatorCacheManager> coordinator;
++    std::shared_ptr<MetadataCompletion>      completion;
++    std::shared_ptr<BlockTreeCache>          cache;
++    DeviceBlockPoolPtr                       decoder_pool;
++    BlockTreeTaskPool*                       business{nullptr};
++    BlockTransferDispatcher*                 dispatcher{nullptr};
++    std::atomic<uint64_t>                    watermark_calls{0}, watermark_blocks{0}, force_calls{0}, force_blocks{0};
++    std::atomic<uint64_t>                    watermark_ns{0}, force_ns{0};
++    uint64_t                                 initial_copy_attempts = physicalCopyAttempts();
++    double                                   init_us{0};
++    uint64_t                                 last_timestamp{0};
++    explicit Impl(const MetadataReplayConfig& o): options(o) {
++        auto begin = Clock::now();
++        require(o.block_tokens && o.cp_size && o.cp_rank < o.cp_size && o.device_blocks && o.linear_step > 0,
++                "invalid metadata config");
++        const size_t max_count = static_cast<size_t>(std::numeric_limits<int>::max()) - 1;
++        require(o.min_replay_tokens > 0 && o.min_replay_tokens <= max_count && o.sliding_window <= max_count
++                    && o.swa_block_tokens <= max_count && o.block_tokens <= max_count
++                    && o.cp_size <= max_count / o.block_tokens,
++                "token geometry exceeds native integer range");
++        for (auto count : {o.device_blocks, o.swa_blocks, o.host_blocks, o.disk_blocks, o.linear_step})
++            require(count <= max_count, "capacity exceeds native block ID range");
++        for (auto levels : {std::make_pair(o.device_low, o.device_high),
++                            std::make_pair(o.host_low, o.host_high),
++                            std::make_pair(o.disk_low, o.disk_high)})
++            require(levels.first >= 0 && levels.second <= 1
++                        && ((levels.first == 0 && levels.second == 0) || levels.first < levels.second),
++                    "invalid watermark levels");
++        config      = o.dsv41_topology ? dsv41Config(o) : fixtureConfig(o);
++        coordinator = std::make_shared<CoordinatorCacheManager>(config);
++        require(coordinator->init(), "coordinator init");
++        coordinator->setCPSlotMapper(std::make_shared<CPSlotMapper>(o.cp_rank, o.cp_size, o.block_tokens));
++        std::vector<GroupSetPtr>              sets;
++        std::vector<std::vector<std::string>> memberships;
++        require(block_tree_layout::buildGroupMembers(config, memberships), "invalid BTC group membership");
++        const auto topology =
++            o.dsv41_topology ? block_tree_layout::projectCacheKeys(config, o.cp_size) : config.topologyPtr();
++        std::map<std::string, DeviceBlockPoolPtr> pools;
++        for (const auto& group : coordinator->cacheGroups())
++            pools.emplace(group->tag(), group->blockPool());
++        if (o.dsv41_topology)
++            decoder_pool = pools.at("decoder_swa_kv");
++        for (const auto& tags : memberships) {
++            const auto&                     first = topology->group(tags.front());
++            std::vector<DeviceBlockPoolPtr> members;
++            size_t                          payload = 0;
++            for (const auto& tag : tags) {
++                members.push_back(pools.at(tag));
++                payload += config.blockSizeBytesForGroup(tag);
++            }
++            const size_t                            stride = (payload + 4095) / 4096 * 4096;
++            std::shared_ptr<HostBlockPool>          hp;
++            std::shared_ptr<BlockTreeDiskBlockPool> kp;
++            const bool swa = first.policy.group_type == CacheGroupType::SWA;
++            const size_t host_blocks = swa && o.host_swa_blocks ? o.host_swa_blocks : o.host_blocks;
++            const size_t disk_blocks = swa && o.disk_swa_blocks ? o.disk_swa_blocks : o.disk_blocks;
++            if (host_blocks) {
++                auto c                  = std::make_shared<HostBlockPoolConfig>();
++                c->pool_type            = BlockPoolType::HOST;
++                c->pool_name            = first.tag + "_host";
++                c->metadata_only        = true;
++                c->physical_block_count = host_blocks + 1;
++                c->payload_bytes        = payload;
++                c->stride_bytes         = stride;
++                hp                      = std::make_shared<HostBlockPool>(c);
++                require(hp->init(), "host metadata init");
++            }
++            if (disk_blocks) {
++                auto c                  = std::make_shared<BlockTreeDiskBlockPoolConfig>();
++                c->pool_type            = BlockPoolType::DISK;
++                c->pool_name            = first.tag + "_disk";
++                c->metadata_only        = true;
++                c->physical_block_count = disk_blocks + 1;
++                c->payload_bytes        = payload;
++                c->stride_bytes         = stride;
++                c->disk_size_bytes      = stride * (disk_blocks + 1);
++                c->work_dir             = "metadata://no-kv-files";
++                kp                      = std::make_shared<BlockTreeDiskBlockPool>(c);
++                require(kp->init(), "disk metadata init");
++            }
++            sets.push_back(first.policy.group_type == CacheGroupType::SWA ?
++                               BenchmarkFixture::createSWAGroupSet(members,
++                                                                   hp,
++                                                                   kp,
++                                                                   sets.size(),
++                                                                   topology,
++                                                                   tags,
++                                                                   first.policy.sliding_window_size,
++                                                                   first.seqSizePerBlock()) :
++                               BenchmarkFixture::createFullGroupSet(members, hp, kp, sets.size(), topology, tags));
++        }
++        completion = std::make_shared<MetadataCompletion>(sets);
++        auto disp  = std::make_unique<BlockTransferDispatcher>(
++            BlockTransferDispatcher::WithSubmitter{},
++            BlockTransferDispatcher::Submitter(
++                [backend = completion](TransferTask task) { return backend->execute(std::move(task)); }));
++        dispatcher   = disp.get();
++        auto pool    = std::make_unique<BlockTreeTaskPool>(1, 10000, "MetadataBTC");
++        business     = pool.get();
++        auto metrics = std::make_shared<BlockTreeCacheMetricsReporter>(nullptr);
++        metrics->setEvictionTimer([this](bool force, uint64_t ns) { (force ? force_ns : watermark_ns) += ns; });
++        metrics->setEvictionObserver([this](Tier, CacheGroupType, bool force, size_t, size_t scheduled) {
++            if (force) {
++                ++force_calls;
++                force_blocks += scheduled;
++            } else {
++                ++watermark_calls;
++                watermark_blocks += scheduled;
++            }
++        });
++        BlockTreeCacheConfig bc;
++        if (o.disk_fifo)
++            bc.disk_eviction_policy = EvictionPolicy::FIFO;
++        bc.enable_host_cache = o.host_blocks > 0;
++        bc.enable_disk_cache = o.disk_blocks > 0;
++        bc.watermark_device  = {o.device_low, o.device_high};
++        bc.watermark_host    = {o.host_low, o.host_high};
++        bc.watermark_disk    = {o.disk_low, o.disk_high};
++        cache                = std::make_shared<BlockTreeCache>(
++            std::make_unique<BlockTree>(sets), bc, nullptr, std::move(disp), std::move(pool), metrics);
++        require(cache->init(), "BTC init");
++        coordinator->attachBlockTreeCache(cache);
++        init_us = micros(begin);
++    }
++    ~Impl() {
++        settle();
++        coordinator.reset();
++        cache.reset();
++        completion.reset();
++    }
++    void settle() {
++        do {
++            business->waitForIdle();
++            completion->wait();
++            dispatcher->drainTransfers();
++            business->waitForIdle();
++        } while (completion->pending() || business->pendingTaskCount() || dispatcher->hasPendingTransfers());
++    }
++    void check() {
++        if (decoder_pool) {
++            // The nonreusable decoder pool is outside the tree and its poolMetricsSnapshots().
++            require(decoder_pool->usedBlocksNum() == 0, "decoder pool retained blocks after request release");
++        }
++        for (const auto& s : cache->poolMetricsSnapshots())
++            require(!s.request_ref_blocks && !s.load_ref_blocks && !s.store_ref_blocks && !s.eviction_target_ref_blocks
++                        && !s.frozen_ref_blocks,
++                    "unreleased request/transfer references");
++    }
++    MetadataRequestResult run(const MetadataRequest& r) {
++        require(r.input_tokens > 0
++                    && r.prefix_keys.size() == static_cast<size_t>(r.input_tokens) / options.block_tokens,
++                "complete prefix keys must match declared base granularity");
++        require(r.timestamp_ns >= last_timestamp, "request order violation");
++        last_timestamp = r.timestamp_ns;
++        MetadataRequestResult out;
++        auto                  begin  = Clock::now();
++        auto                  tokens = std::make_shared<CompleteTokenIds>(1, 1, r.input_tokens, options.block_tokens);
++        tokens->initCacheMetadata(r.input_tokens);
++        auto resources = std::make_shared<BatchKVCacheResource>();
++        resources->resetBatchSize(1);
++        resources->initGroups(config.topologyPtr());
++        for (auto key : r.prefix_keys)
++            resources->pushBackCacheKey(0, key);
++        resources->setLastBlockAligned(r.input_tokens % options.block_tokens == 0);
++        resources->markCacheKeysInitialized();
++        out.stage_us["request_setup"] = micros(begin);
++        MallocInfo mi;
++        mi.batch_kv_cache_resource      = resources;
++        mi.complete_token_ids           = tokens;
++        mi.request_id                   = r.id;
++        mi.verbose                      = false;
++        mi.enable_storage_backend       = false;
++        mi.enable_remove_skipped_blocks = false;
++        try {
++            begin                                             = Clock::now();
++            auto allocated                                    = coordinator->malloc(mi);
++            out.stage_us["malloc_including_match_force_drop"] = micros(begin);
++            out.stage_us["match_nested"]                      = allocated.match_cost_time_us;
++            out.success                                       = allocated.success;
++            out.reuse_tokens                                  = allocated.reuse_len;
++            out.status                                        = allocated.success ? "ok" : "allocation_failed";
++            begin                                             = Clock::now();
++            if (allocated.async_context) {
++                allocated.async_context->waitDone();
++                out.success = out.success && allocated.async_context->success();
++                if (out.success) {
++                    auto load = std::dynamic_pointer_cast<LoadAsyncContext>(allocated.async_context);
++                    require(load != nullptr, "unexpected load context");
++                    out.reuse_tokens =
++                        static_cast<int>(load->matchedBlocks()) * coordinator->cpSlotMapper()->reuseBlockTokens(config);
++                } else
++                    out.status = "load_failed";
++            }
++            settle();
++            out.stage_us["load_ready_settlement"] = micros(begin);
++            if (out.success) {
++                begin           = Clock::now();
++                size_t resident = 0;
++                coordinator->insertIntoCache(InsertInfo{resources, tokens, false, Tier::DEVICE, r.id}, resident);
++                out.stage_us["insert_including_watermark_plan"] = micros(begin);
++            } else
++                out.reuse_tokens = 0;
++            begin = Clock::now();
++            coordinator->free(FreeInfo{resources, tokens, r.id});
++            out.stage_us["release"] = micros(begin);
++            begin                   = Clock::now();
++            settle();
++            out.stage_us["post_request_settlement"] = micros(begin);
++            begin                                   = Clock::now();
++            check();
++            out.stage_us["reference_validation"] = micros(begin);
++            return out;
++        } catch (...) {
++            coordinator->free(FreeInfo{resources, tokens, r.id});
++            settle();
++            throw;
++        }
++    }
++};
++MetadataReplay::MetadataReplay(const MetadataReplayConfig& c): impl_(std::make_unique<Impl>(c)) {}
++MetadataReplay::~MetadataReplay() = default;
++MetadataRequestResult MetadataReplay::run(const MetadataRequest& r) {
++    return impl_->run(r);
++}
++double MetadataReplay::initMicros() const {
++    return impl_->init_us;
++}
++void MetadataReplay::failNextTransfer() {
++    impl_->completion->fail_next = true;
++}
++MetadataReplayStats MetadataReplay::stats() const {
++    const auto&         i = *impl_;
++    MetadataReplayStats s;
++    s.watermark_calls  = i.watermark_calls;
++    s.watermark_blocks = i.watermark_blocks;
++    s.force_calls      = i.force_calls;
++    s.force_blocks     = i.force_blocks;
++    s.transfers        = i.completion->transfers;
++    s.failed_transfers = i.completion->failed;
++    s.device_host      = i.completion->device_host;
++    s.host_disk        = i.completion->host_disk;
++    s.host_device      = i.completion->host_device;
++    s.disk_device      = i.completion->disk_device;
++    s.tree_nodes       = i.cache->getStats().tree_node_count;
++    for (const auto& p : i.cache->poolMetricsSnapshots()) {
++        if (p.tier == Tier::DEVICE)
++            s.device_used += p.used_blocks;
++        else if (p.tier == Tier::HOST)
++            s.host_used += p.used_blocks;
++        else if (p.tier == Tier::DISK)
++            s.disk_used += p.used_blocks;
++    }
++    for (const auto& pool : i.coordinator->groupBlockPools())
++        s.payload_bytes += pool->getAllocationSizeBytes();
++    for (const auto& group : i.cache->groupSets()) {
++        if (auto host = group->hostPool())
++            s.payload_bytes += host->allocatedPayloadBytes();
++        if (auto disk = group->diskPool())
++            require(disk->filePath().empty() && disk->readBytes() == 0 && disk->writeBytes() == 0,
++                    "physical disk backing or IO observed");
++    }
++    s.copy_attempts = physicalCopyAttempts() - i.initial_copy_attempts;
++    s.watermark_ns  = i.watermark_ns;
++    s.force_ns      = i.force_ns;
++    return s;
++}
++bool MetadataReplay::checkPinnedForceDrop() {
++    auto& i = *impl_;
++    i.settle();
++    auto group = i.coordinator->cacheGroups().front();
++    auto pool  = group->blockPool();
++    // The fixture isolates pinning from cache occupancy.
++    require(pool->freeBlocksNum() == pool->totalBlocksNum(), "pin test needs an empty instance");
++    i.settle();
++    auto ids = pool->malloc(pool->freeBlocksNum());
++    require(ids.has_value(), "pin fixture allocation");
++    pool->incRef(*ids);
++    auto before    = i.force_calls.load();
++    bool ok        = group->ensureFreeBlocks(1);
++    bool preserved = pool->referencedBlocksNum() == ids->size();
++    pool->decRef(*ids);
++    i.settle();
++    i.check();
++    return !ok && preserved && i.force_calls > before;
++}
++}  // namespace rtp_llm::benchmark
+diff --git a/rtp_llm/cpp/cache/block_tree_cache/benchmark/metadata/MetadataReplay.h b/rtp_llm/cpp/cache/block_tree_cache/benchmark/metadata/MetadataReplay.h
+new file mode 100644
+index 000000000..8cecd6d69
+--- /dev/null
++++ b/rtp_llm/cpp/cache/block_tree_cache/benchmark/metadata/MetadataReplay.h
+@@ -0,0 +1,51 @@
++#pragma once
++#include <cstdint>
++#include <map>
++#include <memory>
++#include <string>
++#include <vector>
++namespace rtp_llm::benchmark {
++struct MetadataReplayConfig {
++    bool disk_fifo{false};
++    MetadataReplayConfig();
++    size_t block_tokens{256}, cp_size{1}, cp_rank{0}, min_replay_tokens{1};
++    size_t device_blocks{64}, host_blocks{128}, disk_blocks{256};
++    size_t host_swa_blocks{0}, disk_swa_blocks{0};
++    bool   swa{true}, dsv41_topology{false};
++    size_t swa_block_tokens{0}, swa_blocks{64}, sliding_window{128}, last_n, linear_step;
++    double device_low{0}, device_high{0}, host_low{0}, host_high{0}, disk_low{0}, disk_high{0};
++};
++struct MetadataRequest {
++    int64_t              id{0};
++    uint64_t             timestamp_ns{0};
++    int                  input_tokens{0};
++    std::vector<int64_t> prefix_keys;
++};
++struct MetadataRequestResult {
++    bool                          success{false};
++    int                           reuse_tokens{0};
++    std::string                   status;
++    std::map<std::string, double> stage_us;
++};
++struct MetadataReplayStats {
++    uint64_t watermark_calls{0}, watermark_blocks{0}, force_calls{0}, force_blocks{0};
++    uint64_t transfers{0}, failed_transfers{0}, device_host{0}, host_disk{0}, host_device{0}, disk_device{0};
++    uint64_t payload_bytes{0}, copy_attempts{0}, watermark_ns{0}, force_ns{0};
++    uint64_t tree_nodes{0}, device_used{0}, host_used{0}, disk_used{0};
++};
++class MetadataReplay {
++public:
++    explicit MetadataReplay(const MetadataReplayConfig& config);
++    ~MetadataReplay();
++    MetadataRequestResult run(const MetadataRequest& request);
++    MetadataReplayStats   stats() const;
++    double                initMicros() const;
++    // Test the native allocation callback with every pool slot request-pinned.
++    bool checkPinnedForceDrop();
++    void failNextTransfer();
++
++private:
++    struct Impl;
++    std::unique_ptr<Impl> impl_;
++};
++}  // namespace rtp_llm::benchmark
+diff --git a/rtp_llm/cpp/cache/block_tree_cache/benchmark/metadata/MetadataReplayMain.cc b/rtp_llm/cpp/cache/block_tree_cache/benchmark/metadata/MetadataReplayMain.cc
+new file mode 100644
+index 000000000..d094f9ac0
+--- /dev/null
++++ b/rtp_llm/cpp/cache/block_tree_cache/benchmark/metadata/MetadataReplayMain.cc
+@@ -0,0 +1,282 @@
++#include <filesystem>
++#include <fstream>
++#include <iostream>
++#include <map>
++#include <chrono>
++#include <algorithm>
++#include <iomanip>
++#include <rapidjson/document.h>
++#include <rapidjson/stringbuffer.h>
++#include <rapidjson/writer.h>
++#include <sys/resource.h>
++#include <random>
++#include <cmath>
++#include <cstring>
++#include <limits>
++#include "rtp_llm/cpp/cache/block_tree_cache/benchmark/metadata/MetadataReplay.h"
++#include "rtp_llm/cpp/utils/Logger.h"
++using namespace rtp_llm::benchmark;
++using Clock = std::chrono::steady_clock;
++void require(bool ok, const char* message) {
++    if (!ok)
++        throw std::runtime_error(message);
++}
++rapidjson::Document json(const std::string& s) {
++    rapidjson::Document d;
++    d.Parse(s.c_str());
++    require(!d.HasParseError() && d.IsObject(), "invalid JSON object");
++    return d;
++}
++std::string quoted(const std::string& text) {
++    rapidjson::StringBuffer                    buffer;
++    rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
++    writer.String(text.data(), static_cast<rapidjson::SizeType>(text.size()));
++    return buffer.GetString();
++}
++struct StageTimes {
++    uint64_t            count{0};
++    double              total{0};
++    std::vector<double> sample;
++    std::mt19937_64     rng{1};
++    void                add(double elapsed) {
++        ++count;
++        total += elapsed;
++        if (sample.size() < 4096)
++            sample.push_back(elapsed);
++        else {
++            auto index = std::uniform_int_distribution<uint64_t>(0, count - 1)(rng);
++            if (index < sample.size())
++                sample[index] = elapsed;
++        }
++    }
++    double quantile(double fraction) const {
++        return sample.at(static_cast<size_t>(std::ceil(fraction * sample.size())) - 1);
++    }
++};
++// BTCPFX01 stores signed base prefix keys in little-endian order.
++template<class T>
++T readScalar(std::istream& input) {
++    T value{};
++    require(bool(input.read(reinterpret_cast<char*>(&value), sizeof(value))), "truncated prepared trace");
++    return value;
++}
++std::string readLabel(std::istream& input) {
++    auto length = readScalar<uint32_t>(input);
++    require(length <= 1048576, "invalid prepared label length");
++    std::string value(length, '\0');
++    require(bool(input.read(value.data(), length)), "truncated prepared label");
++    return value;
++}
++int main(int argc, char** argv) {
++    std::filesystem::path out;
++    bool                  created = false;
++    try {
++        require(argc == 4, "usage: metadata_replay CONFIG.json REQUESTS.jsonl|REQUESTS.btcbin NEW_OUTPUT_DIR");
++        std::ifstream cf(argv[1]);
++        require(bool(cf), "config missing");
++        auto                           d = json(std::string(std::istreambuf_iterator<char>(cf), {}));
++        MetadataReplayConfig           c;
++        std::map<std::string, size_t*> ints = {{"block_tokens", &c.block_tokens},
++                                               {"cp_size", &c.cp_size},
++                                               {"cp_rank", &c.cp_rank},
++                                               {"min_replay_tokens", &c.min_replay_tokens},
++                                               {"device_blocks", &c.device_blocks},
++                                               {"host_blocks", &c.host_blocks},
++                                               {"disk_blocks", &c.disk_blocks},
++                                               {"swa_block_tokens", &c.swa_block_tokens},
++                                               {"swa_blocks", &c.swa_blocks},
++                                               {"last_n", &c.last_n},
++                                               {"linear_step", &c.linear_step},
++                                               {"sliding_window", &c.sliding_window}};
++        for (auto& [key, p] : ints)
++            if (d.HasMember(key.c_str())) {
++                require(d[key.c_str()].IsUint64(), "integer config invalid");
++                *p = d[key.c_str()].GetUint64();
++            }
++        std::map<std::string, double*> floats = {{"device_low", &c.device_low},
++                                                 {"device_high", &c.device_high},
++                                                 {"host_low", &c.host_low},
++                                                 {"host_high", &c.host_high},
++                                                 {"disk_low", &c.disk_low},
++                                                 {"disk_high", &c.disk_high}};
++        for (auto& [key, p] : floats)
++            if (d.HasMember(key.c_str())) {
++                require(d[key.c_str()].IsNumber(), "watermark invalid");
++                *p = d[key.c_str()].GetDouble();
++            }
++        if (d.HasMember("swa")) {
++            require(d["swa"].IsBool(), "swa invalid");
++            c.swa = d["swa"].GetBool();
++        }
++        for (auto pair : {std::make_pair(c.device_low, c.device_high),
++                          std::make_pair(c.host_low, c.host_high),
++                          std::make_pair(c.disk_low, c.disk_high)})
++            require(pair.first >= 0 && pair.second <= 1
++                        && ((pair.first == 0 && pair.second == 0) || pair.first < pair.second),
++                    "invalid watermarks");
++        for (const auto& member : d.GetObject()) {
++            std::string key = member.name.GetString();
++            require(ints.count(key) || floats.count(key) || key == "swa", "unknown config option");
++        }
++        out = argv[3];
++        require(!std::filesystem::exists(out), "output exists");
++        require(std::filesystem::create_directories(out), "output directory already claimed");
++        created = true;
++        rtp_llm::initLogger();
++        MetadataReplay replay(c);
++        std::ifstream  input(argv[2], std::ios::binary);
++        require(bool(input), "trace missing");
++        std::ofstream rows(out / "requests.jsonl");
++        require(bool(rows), "output unavailable");
++        uint64_t                          requests = 0, failed = 0, tokens = 0, hits = 0;
++        std::string                       line, instance;
++        std::map<std::string, StageTimes> stages;
++        const bool                        prepared          = std::filesystem::path(argv[2]).extension() == ".btcbin";
++        uint64_t                          expected_requests = 0, expected_tokens = 0;
++        if (prepared) {
++            uint32_t endian = 1;
++            char     magic[8];
++            require(*reinterpret_cast<char*>(&endian) == 1 && input.read(magic, 8)
++                        && std::memcmp(magic, "BTCPFX01", 8) == 0,
++                    "unsupported prepared format");
++            require(readScalar<uint32_t>(input) == c.block_tokens, "prepared base granularity mismatch");
++            expected_requests = readScalar<uint64_t>(input);
++            expected_tokens   = readScalar<uint64_t>(input);
++            instance          = readLabel(input);
++            require(expected_requests && !instance.empty(), "invalid prepared header");
++        }
++        const auto run_begin = Clock::now();
++        for (;;) {
++            const auto      read_begin = Clock::now();
++            MetadataRequest request;
++            std::string     trace_id;
++            if (prepared) {
++                if (requests == expected_requests)
++                    break;
++                request.id           = static_cast<int64_t>(requests + 1);
++                request.timestamp_ns = readScalar<uint64_t>(input);
++                auto length          = readScalar<uint32_t>(input);
++                require(request.timestamp_ns && length > 0 && length <= std::numeric_limits<int>::max(),
++                        "invalid prepared record");
++                request.input_tokens = static_cast<int>(length);
++                trace_id             = readLabel(input);
++                request.prefix_keys.resize(length / c.block_tokens);
++                if (!request.prefix_keys.empty())
++                    require(bool(input.read(reinterpret_cast<char*>(request.prefix_keys.data()),
++                                            request.prefix_keys.size() * sizeof(int64_t))),
++                            "truncated prepared keys");
++                stages["prepared_read"].add(
++                    std::chrono::duration<double, std::micro>(Clock::now() - read_begin).count());
++            } else {
++                if (!std::getline(input, line))
++                    break;
++                stages["read_line"].add(std::chrono::duration<double, std::micro>(Clock::now() - read_begin).count());
++                const auto parse_begin = Clock::now();
++                auto       r           = json(line);
++                require(r.HasMember("key_form") && r["key_form"].IsString()
++                            && std::string(r["key_form"].GetString()) == "prefix",
++                        "require declared prefix keys; raw hash conversion is not implicit");
++                require(r.HasMember("block_tokens") && r["block_tokens"].IsUint64()
++                            && r["block_tokens"].GetUint64() == c.block_tokens,
++                        "trace base granularity mismatch");
++                require(r.HasMember("input_len") && r["input_len"].IsInt() && r["input_len"].GetInt() > 0,
++                        "input_len missing/invalid");
++                require(r.HasMember("keys") && r["keys"].IsArray(), "keys missing");
++                require(r.HasMember("timestamp_ns") && r["timestamp_ns"].IsUint64(), "timestamp missing");
++                require(r.HasMember("instance_id") && r["instance_id"].IsString(), "instance_id missing");
++                std::string current = r["instance_id"].GetString();
++                require(!current.empty(), "empty instance");
++                if (instance.empty())
++                    instance = current;
++                require(instance == current, "one cache domain per run required");
++                require(r["timestamp_ns"].GetUint64() > 0, "timestamp must be positive");
++                trace_id = std::to_string(requests + 1);
++                if (r.HasMember("request_id")) {
++                    require(r["request_id"].IsString(), "request ID must be a string");
++                    trace_id.assign(r["request_id"].GetString(), r["request_id"].GetStringLength());
++                }
++                request.id           = static_cast<int64_t>(requests + 1);
++                request.timestamp_ns = r["timestamp_ns"].GetUint64();
++                request.input_tokens = r["input_len"].GetInt();
++                for (const auto& key : r["keys"].GetArray()) {
++                    require(key.IsInt64(), "keys must be signed int64 without floating conversion");
++                    request.prefix_keys.push_back(key.GetInt64());
++                }
++                const double parse_us = std::chrono::duration<double, std::micro>(Clock::now() - parse_begin).count();
++                stages["parse_adapt"].add(parse_us);
++            }
++            auto result = replay.run(request);
++            ++requests;
++            tokens += request.input_tokens;
++            failed += !result.success;
++            hits += result.reuse_tokens;
++            for (const auto& [stage, us] : result.stage_us)
++                stages[stage].add(us);
++            auto write_begin = Clock::now();
++            rows << "{\"ordinal\":" << requests << ",\"request_id\":" << quoted(trace_id)
++                 << ",\"timestamp_ns\":" << request.timestamp_ns << ",\"input_tokens\":" << request.input_tokens
++                 << ",\"success\":" << (result.success ? "true" : "false")
++                 << ",\"reuse_tokens\":" << result.reuse_tokens << ",\"status\":\"" << result.status << "\"}\n";
++            require(bool(rows), "row write failed");
++            stages["serialize"].add(std::chrono::duration<double, std::micro>(Clock::now() - write_begin).count());
++        }
++        if (prepared)
++            require(requests == expected_requests && tokens == expected_tokens
++                        && input.peek() == std::char_traits<char>::eof(),
++                    "prepared cohort mismatch");
++        require(input.eof() && !input.bad() && requests > 0, "input failure or empty trace");
++        rows.close();
++        require(bool(rows), "row flush failed");
++        auto          s = replay.stats();
++        struct rusage usage{};
++        require(getrusage(RUSAGE_SELF, &usage) == 0, "RSS query failed");
++        std::ofstream summary(out / "summary.json");
++        summary << std::setprecision(17) << "{\"complete\":true,\"requests\":" << requests
++                << ",\"linear_step\":" << c.linear_step << ",\"linear_step_source\":"
++                << quoted(d.HasMember("linear_step") ? "explicit_override" : "KVCacheConfig default")
++                << ",\"swa_active_tail_blocks\":" << (c.swa ? std::to_string(c.last_n) : "null")
++                << ",\"swa_tail_source\":"
++                << quoted(!c.swa                ? "disabled" :
++                          d.HasMember("last_n") ? "explicit_override" :
++                                                  "SWA group policy default")
++                << ",\"failed_requests\":" << failed << ",\"input_tokens\":" << tokens << ",\"hit_tokens\":" << hits
++                << ",\"hit_rate_all_submitted\":" << double(hits) / tokens
++                << ",\"watermark_round_reports\":" << s.watermark_calls
++                << ",\"watermark_scheduled_blocks\":" << s.watermark_blocks << ",\"force_drop_calls\":" << s.force_calls
++                << ",\"force_drop_reclaimed_blocks\":" << s.force_blocks << ",\"transfers\":" << s.transfers
++                << ",\"failed_transfers\":" << s.failed_transfers << ",\"device_host\":" << s.device_host
++                << ",\"host_disk\":" << s.host_disk << ",\"host_device\":" << s.host_device
++                << ",\"disk_device\":" << s.disk_device << ",\"tree_nodes\":" << s.tree_nodes
++                << ",\"device_used\":" << s.device_used << ",\"host_used\":" << s.host_used
++                << ",\"disk_used\":" << s.disk_used << ",\"kv_payload_bytes_allocated\":" << s.payload_bytes
++                << ",\"physical_copy_attempts\":" << s.copy_attempts
++                << ",\"watermark_check_work_us\":" << s.watermark_ns / 1000.0
++                << ",\"force_drop_work_us\":" << s.force_ns / 1000.0 << ",\"init_us\":" << replay.initMicros()
++                << ",\"run_us\":" << std::chrono::duration<double, std::micro>(Clock::now() - run_begin).count()
++                << ",\"peak_rss_kib\":" << usage.ru_maxrss << ",\"instance_id\":" << quoted(instance)
++                << ",\"stages\":{";
++        bool comma = false;
++        for (auto& [stage, values] : stages) {
++            std::sort(values.sample.begin(), values.sample.end());
++            if (comma)
++                summary << ',';
++            comma = true;
++            summary << quoted(stage) << ":{\"count\":" << values.count << ",\"total_us\":" << values.total
++                    << ",\"mean_us\":" << values.total / values.count
++                    << ",\"quantile_sample_count\":" << values.sample.size() << ",\"p50_us\":" << values.quantile(0.5)
++                    << ",\"p95_us\":" << values.quantile(0.95) << ",\"p99_us\":" << values.quantile(0.99) << "}";
++        }
++        summary << "}}\n";
++        summary.close();
++        require(bool(summary), "summary write failed");
++        std::cout << "complete " << requests << " requests\n";
++        return 0;
++    } catch (const std::exception& e) {
++        std::cerr << "FAIL: " << e.what() << '\n';
++        if (created) {
++            std::ofstream f(out / "FAILED.txt");
++            f << e.what() << '\n';
++        }
++        return 1;
++    }
++}
+diff --git a/rtp_llm/cpp/cache/block_tree_cache/benchmark/metadata/MetadataReplayTest.cc b/rtp_llm/cpp/cache/block_tree_cache/benchmark/metadata/MetadataReplayTest.cc
+new file mode 100644
+index 000000000..37f1fdb3c
+--- /dev/null
++++ b/rtp_llm/cpp/cache/block_tree_cache/benchmark/metadata/MetadataReplayTest.cc
+@@ -0,0 +1,56 @@
++#include <iostream>
++#include <type_traits>
++#include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
++static_assert(std::is_constructible_v<rtp_llm::BlockTransferDispatcher, std::nullptr_t>);
++#include <stdexcept>
++#include "rtp_llm/cpp/cache/block_tree_cache/benchmark/metadata/MetadataReplay.h"
++using namespace rtp_llm::benchmark;
++void require(bool condition, const char* message) {
++    if (!condition)
++        throw std::runtime_error(message);
++}
++MetadataRequest request(int id, std::vector<int64_t> keys) {
++    return {id, static_cast<uint64_t>(id), static_cast<int>(keys.size() * 256 + 128), std::move(keys)};
++}
++int main() {
++    MetadataReplayConfig c;
++    c.device_blocks = 32;
++    c.swa_blocks    = 32;
++    MetadataReplay replay(c);
++    auto           a = replay.run(request(1, {1, 2, 3, 4}));
++    auto           b = replay.run(request(2, {1, 2, 3, 4}));
++    require(a.success && a.reuse_tokens == 0, "first miss");
++    require(b.success && b.reuse_tokens == 1024, "repeat hit");
++    MetadataReplay pinned(c);
++    require(pinned.checkPinnedForceDrop(), "pinned force_drop must fail without destroying refs");
++    MetadataReplayConfig f;
++    f.swa           = false;
++    f.device_blocks = 8;
++    f.host_blocks   = 0;
++    f.disk_blocks   = 0;
++    MetadataReplay force(f);
++    require(force.run(request(1, {1, 2, 3, 4})).success, "first allocation");
++    require(force.run(request(2, {11, 12, 13, 14})).success, "force_drop allocation");
++    require(force.stats().force_blocks > 0, "native force_drop must reclaim");
++    MetadataReplayConfig tiered;
++    tiered.swa           = false;
++    tiered.device_blocks = 16;
++    tiered.host_blocks   = 16;
++    tiered.disk_blocks   = 128;
++    tiered.device_low = tiered.host_low = 0.5;
++    tiered.device_high = tiered.host_high = 0.75;
++    MetadataReplay pressure(tiered);
++    for (int j = 0; j < 12; ++j) {
++        int x = j * 100;
++        require(pressure.run(request(j + 1, {x + 1, x + 2, x + 3, x + 4})).success, "pressure fill");
++    }
++    require(pressure.stats().watermark_blocks > 0 && pressure.stats().host_disk > 0, "watermark cascade");
++    pressure.failNextTransfer();
++    auto broken = pressure.run(request(13, {1, 2, 3, 4}));
++    require(!broken.success && broken.status == "load_failed" && broken.reuse_tokens == 0, "injected load failure");
++    auto recovered = pressure.run(request(14, {1, 2, 3, 4}));
++    require(recovered.success && recovered.reuse_tokens == 1024 && pressure.stats().failed_transfers == 1,
++            "successful retry after rollback");
++    std::cout << "PASS watermark cascade, injected load failure, release and recovery\n";
++    std::cout << "PASS basic metadata lifecycle\n";
++}
+diff --git a/rtp_llm/cpp/cache/block_tree_cache/benchmark/metadata/NoPayloadOps.cc b/rtp_llm/cpp/cache/block_tree_cache/benchmark/metadata/NoPayloadOps.cc
+new file mode 100644
+index 000000000..20087969c
+--- /dev/null
++++ b/rtp_llm/cpp/cache/block_tree_cache/benchmark/metadata/NoPayloadOps.cc
+@@ -0,0 +1,19 @@
++#include <stdexcept>
++#include <atomic>
++#include <cstdint>
++namespace rtp_llm {
++namespace {
++std::atomic<uint64_t> attempts{0};
++}
++namespace benchmark {
++uint64_t physicalCopyAttempts() {
++    return attempts.load();
++}
++}  // namespace benchmark
++struct BatchCopyParams;
++// This executable must never fall through to the physical forward-copy operation.
++void execBatchCopy(const BatchCopyParams&) {
++    ++attempts;
++    throw std::logic_error("physical execBatchCopy is forbidden in metadata replay");
++}
++}  // namespace rtp_llm
+diff --git a/rtp_llm/cpp/cache/block_tree_cache/benchmark/metadata/ResidentReplayMain.cc b/rtp_llm/cpp/cache/block_tree_cache/benchmark/metadata/ResidentReplayMain.cc
+new file mode 100644
+index 000000000..26c2e1ee1
+--- /dev/null
++++ b/rtp_llm/cpp/cache/block_tree_cache/benchmark/metadata/ResidentReplayMain.cc
+@@ -0,0 +1,235 @@
++#include <climits>
++// Hold a quiescent native BTC instance between approved, ordered trace segments.
++#include <chrono>
++#include <cstring>
++#include <filesystem>
++#include <fstream>
++#include <iomanip>
++#include <iostream>
++#include <limits>
++#include <map>
++#include <sstream>
++#include <thread>
++#include <cstdlib>
++#include <sys/resource.h>
++#include <unistd.h>
++#include <rapidjson/document.h>
++#include "rtp_llm/cpp/cache/block_tree_cache/benchmark/metadata/MetadataReplay.h"
++#include "rtp_llm/cpp/utils/Logger.h"
++using namespace rtp_llm::benchmark;
++namespace fs = std::filesystem;
++using Clock  = std::chrono::steady_clock;
++namespace {
++constexpr uint64_t day_start = 1793030400000000000ULL, day_end = day_start + 86400ULL * 1000000000;
++constexpr uint64_t day_requests = 65740206, chunk_size = 100000;
++void               check(bool ok, const char* msg) {
++    if (!ok)
++        throw std::runtime_error(msg);
++}
++template<class T>
++T scalar(std::istream& f) {
++    T v{};
++    check(bool(f.read(reinterpret_cast<char*>(&v), sizeof(v))), "truncated record");
++    return v;
++}
++std::string label(std::istream& f) {
++    auto n = scalar<uint32_t>(f);
++    check(n <= 1048576, "invalid label size");
++    std::string s(n, '\0');
++    check(bool(f.read(s.data(), n)), "short label");
++    return s;
++}
++void atomicWrite(const fs::path& p, const std::string& s) {
++    auto t = p;
++    t += ".tmp";
++    std::ofstream f(t);
++    f << s << '\n';
++    f.close();
++    check(bool(f), "result write failed");
++    fs::rename(t, p);
++}
++uint64_t through(const fs::path& root) {
++    std::ifstream f(root / "authorized-through");
++    uint64_t      n = 0;
++    check(bool(f >> n) && n <= day_requests && n > 0, "invalid authorized-through");
++    return n;
++}
++MetadataReplayConfig config(const fs::path& path) {
++    std::ifstream       f(path);
++    std::string         body(std::istreambuf_iterator<char>(f), {});
++    rapidjson::Document d;
++    d.Parse(body.c_str());
++    check(!d.HasParseError() && d.IsObject(), "invalid capacity file");
++    const auto& tiers  = d["tiers"];
++    auto usable = [&](const char* tier, const char* group) {
++        const auto& value = tiers[tier][group];
++        check(value.IsInt() && value.GetInt() > 0 && value.GetInt() < INT_MAX, "invalid tier capacity");
++        return value.GetUint();
++    };
++    MetadataReplayConfig c;
++    c.dsv41_topology    = true;
++    c.block_tokens      = 256;
++    c.cp_size           = 4;
++    c.cp_rank           = 0;
++    c.min_replay_tokens = 128;
++    c.swa_block_tokens  = 1024;
++    c.sliding_window    = 128;
++    c.linear_step       = 1;
++    if (d.HasMember("last_n")) {
++        check(d["last_n"].IsUint() && d["last_n"].GetUint() > 0, "invalid last_n");
++        c.last_n = d["last_n"].GetUint();
++    }
++    c.disk_fifo = d.HasMember("disk_fifo") && d["disk_fifo"].GetBool();
++    c.device_blocks = usable("device", "full");
++    c.swa_blocks = usable("device", "swa");
++    c.host_blocks = usable("host", "full");
++    c.host_swa_blocks = usable("host", "swa");
++    c.disk_blocks = usable("disk", "full");
++    c.disk_swa_blocks = usable("disk", "swa");
++    c.device_low  = .82;
++    c.device_high = .90;
++    c.host_low    = .90;
++    c.host_high   = .94;
++    c.disk_low    = .92;
++    c.disk_high   = .97;
++    return c;
++}
++struct Session {
++    fs::path                      input, out;
++    MetadataReplay                engine;
++    Clock::time_point             start = Clock::now();
++    uint64_t                      n = 0, tokens = 0, hits = 0, failed = 0, last_ts = 0, limit = 0;
++    std::map<std::string, double> stages;
++    std::ofstream                 facts;
++    Session(fs::path source, fs::path dest, const MetadataReplayConfig& c):
++        input(source), out(dest), engine(c), limit(through(dest)), facts(dest / "hit-tokens.u32", std::ios::binary) {
++        check(bool(facts), "cannot write hit counters");
++    }
++    std::string state(const char* status) {
++        auto s = engine.stats();
++        check(s.payload_bytes == 0 && s.copy_attempts == 0, "physical backing/copy encountered");
++        struct rusage usage{};
++        getrusage(RUSAGE_SELF, &usage);
++        std::ostringstream o;
++        o << std::setprecision(17) << "{\"status\":\"" << status << "\",\"pid\":" << getpid() << ",\"requests\":" << n
++          << ",\"input_tokens\":" << tokens << ",\"hit_tokens\":" << hits
++          << ",\"hit_rate\":" << (tokens ? double(hits) / tokens : 0) << ",\"failed\":" << failed
++          << ",\"last_timestamp_ns\":" << last_ts << ",\"next_ordinal\":" << n + 1
++          << ",\"next_chunk\":" << n / chunk_size << ",\"chunk_offset\":" << n % chunk_size
++          << ",\"force_drop_blocks\":" << s.force_blocks << ",\"watermark_blocks\":" << s.watermark_blocks
++          << ",\"tree_nodes\":" << s.tree_nodes << ",\"device_used\":" << s.device_used
++          << ",\"host_used\":" << s.host_used << ",\"disk_used\":" << s.disk_used
++          << ",\"failed_transfers\":" << s.failed_transfers << ",\"kv_payload_bytes\":" << s.payload_bytes
++          << ",\"physical_copy_attempts\":" << s.copy_attempts << ",\"max_rss_kib\":" << usage.ru_maxrss
++          << ",\"elapsed_s\":" << std::chrono::duration<double>(Clock::now() - start).count() << ",\"stage_us\":{";
++        bool comma = false;
++        for (auto& v : stages) {
++            if (comma)
++                o << ',';
++            comma = true;
++            o << '"' << v.first << "\":" << v.second;
++        }
++        o << "}}";
++        return o.str();
++    }
++    void boundary() {
++        if (n != limit)
++            return;
++        facts.flush();
++        check(bool(facts), "facts flush failed");
++        auto summary = state("held");
++        atomicWrite(out / ("held-" + std::to_string(n) + ".json"), summary);
++        atomicWrite(out / "progress.json", summary);
++        // Keep the engine, workers, LRU, tier memberships, IDs and input cursor alive.
++        while (limit == n) {
++            std::this_thread::sleep_for(std::chrono::seconds(3));
++            limit = through(out);
++            check(limit >= n, "backward resume forbidden");
++        }
++    }
++    void run() {
++        MetadataRequest q;
++        uint64_t        index = 0;
++        for (;; ++index) {
++            std::ostringstream name;
++            name << std::setw(6) << std::setfill('0') << index << ".btcbin";
++            auto file = input / name.str();
++            while (!fs::exists(file)) {
++                check(!fs::exists(input / "FAILED.json"), "input producer failed");
++                std::this_thread::sleep_for(std::chrono::seconds(2));
++            }
++            std::ifstream f(file, std::ios::binary);
++            char          magic[8];
++            check(bool(f.read(magic, 8)) && !std::memcmp(magic, "BTCPFX01", 8) && scalar<uint32_t>(f) == 256,
++                  "bad chunk header");
++            auto count = scalar<uint64_t>(f), expected = scalar<uint64_t>(f);
++            check(count == std::min<uint64_t>(chunk_size, day_requests - n), "unexpected chunk size");
++            auto domain = label(f);
++            check(!domain.empty(), "empty domain");
++            if (index == 0)
++                atomicWrite(out / "cache-domain.txt", domain);
++            else {
++                std::ifstream df(out / "cache-domain.txt");
++                std::string   first;
++                std::getline(df, first);
++                check(first == domain, "domain changed");
++            }
++            uint64_t chunk_tokens = 0;
++            for (uint64_t i = 0; i < count; ++i) {
++                q.id           = n + 1;
++                q.timestamp_ns = scalar<uint64_t>(f);
++                auto len       = scalar<uint32_t>(f);
++                check(len && len <= std::numeric_limits<int>::max(), "bad token length");
++                q.input_tokens = len;
++                check(q.timestamp_ns >= day_start && q.timestamp_ns < day_end && q.timestamp_ns >= last_ts,
++                      "timestamp outside ordered day");
++                (void)label(f);
++                q.prefix_keys.resize(len / 256);
++                if (!q.prefix_keys.empty())
++                    check(bool(f.read(reinterpret_cast<char*>(q.prefix_keys.data()), 8 * q.prefix_keys.size())),
++                          "truncated base keys");
++                auto result = engine.run(q);
++                check(result.reuse_tokens >= 0 && result.reuse_tokens <= q.input_tokens, "bad hit count");
++                auto hit = static_cast<uint32_t>(result.reuse_tokens);
++                facts.write(reinterpret_cast<const char*>(&hit), sizeof(hit));
++                check(bool(facts), "facts write failed");
++                ++n;
++                failed += !result.success;
++                tokens += len;
++                chunk_tokens += len;
++                hits += hit;
++                last_ts = q.timestamp_ns;
++                for (auto& v : result.stage_us)
++                    stages[v.first] += v.second;
++                if (i + 1 == count)
++                    check(chunk_tokens == expected && f.peek() == std::char_traits<char>::eof(),
++                          "invalid complete chunk");
++                if (n % 10000 == 0)
++                    atomicWrite(out / "progress.json", state("running"));
++                boundary();
++            }
++        }
++    }
++};
++}  // namespace
++int main(int argc, char** argv) {
++    if (argc != 4) {
++        std::cerr << "usage: resident_replay CAPACITY.json CHUNKS NEW_RUN_DIR\n";
++        return 2;
++    }
++    const fs::path out = argv[3];
++    try {
++        check(!fs::exists("/dev/nvidia0") && !fs::exists("/dev/nvidiactl"), "GPU device accessible");
++        check(!fs::exists(out / "progress.json") && !fs::exists(out / "hit-tokens.u32"), "run is not fresh");
++        rtp_llm::initLogger();
++        Session session(argv[2], out, config(argv[1]));
++        atomicWrite(out / "progress.json", session.state("starting"));
++        session.run();
++    } catch (const std::exception& e) {
++        std::cerr << e.what() << '\n';
++        if (!fs::exists(out / "FAILED.txt"))
++            atomicWrite(out / "FAILED.txt", e.what());
++        return 1;
++    }
++    return 0;
++}
+diff --git a/rtp_llm/cpp/cache/block_tree_cache/benchmark/metadata/export_dsv41_profile.py b/rtp_llm/cpp/cache/block_tree_cache/benchmark/metadata/export_dsv41_profile.py
+new file mode 100644
+index 000000000..e93198a80
+--- /dev/null
++++ b/rtp_llm/cpp/cache/block_tree_cache/benchmark/metadata/export_dsv41_profile.py
+@@ -0,0 +1,74 @@
++"""Export the pinned model's native descriptor assignments. Run in an RTP-LLM environment."""
++import hashlib
++import json
++import sys
++from pathlib import Path
++
++from rtp_llm.models.dsv41_kv_cache import build_v41_kv_cache_spec_descs
++from rtp_llm.models.dsv4_kv_cache import apply_dsv4_explicit_pool_blocks
++
++
++def enum(value, kind):
++    name = value.name
++    if kind == "KVCacheSpecType":
++        name = {"OPAQUE_KV": "OpaqueKV", "OPAQUE_STATE": "OpaqueState"}[name]
++    return f"{kind}::{name}"
++
++
++def render(config_path):
++    data = Path(config_path).read_bytes()
++    model = json.loads(data)["text_config"]
++    target = build_v41_kv_cache_spec_descs(
++        model["num_hidden_layers"], model["compress_ratios"], model["kv_source_layer_ids"],
++        model["head_dim"], bounded_replay=True,
++    )
++    draft = build_v41_kv_cache_spec_descs(
++        model["num_nextn_predict_layers"], model["compress_ratios"][len(target):], [],
++        model["head_dim"], bounded_replay=True, draft=True,
++    )
++    # last-n-20261029/online-pools.json, explicit setting including reserved block zero.
++    apply_dsv4_explicit_pool_blocks(target + draft, "decoder_swa_kv", 1024)
++    prototypes = {desc.tag: desc for layer in target + draft for desc in layer}
++    print("// Generated by export_dsv41_profile.py from model-config.json SHA256")
++    print("// " + hashlib.sha256(data).hexdigest())
++    print('#pragma once\n#include "rtp_llm/cpp/cache/KVCacheSpecDesc.h"')
++    print("#include <vector>\nnamespace rtp_llm::benchmark::dsv41 {")
++    print(f"constexpr int kWindow = {model['sliding_window']};")
++    print(f"constexpr int kDraftBlockSize = {model['dspark_block_size']};")
++    print("inline std::vector<KVCacheSpecDesc> descriptors() {")
++    for tag, desc in prototypes.items():
++        print(f"    KVCacheSpecDesc {tag};")
++        fields = dict(
++            tag=json.dumps(tag), cache_type=enum(desc.cache_type, "KVCacheSpecType"),
++            dtype=enum(desc.dtype, "DataType"), entry_dtype=enum(desc.entry_dtype, "DataType"),
++            entry_count_mode=enum(desc.entry_count_mode, "OpaqueBlockEntryCountMode"),
++            entry_elems=desc.entry_elems, compression_ratio=desc.compression_ratio,
++        )
++        for key in ("is_state_cache", "state_ring_include_gen_num_per_cycle", "state_ring_overlap",
++                    "block_stride_alignment_min_entries", "block_stride_bytes_alignment"):
++            if value := getattr(desc, key):
++                fields[key] = str(value).lower()
++        if desc.cp is not None:
++            fields.update({"cp": "CacheCpPolicyDesc{}", "cp->align_payload": str(desc.cp.align_payload).lower(),
++                           "cp->scale_seq_size": str(desc.cp.scale_seq_size).lower(),
++                           "cp->prefill_slice_layout": enum(desc.cp.prefill_slice_layout, "CpPrefillSliceLayout"),
++                           "cp->slice": enum(desc.cp.slice, "CpBlockSliceMode")})
++        if desc.reuse is not None and desc.reuse.enable_prefix_reuse is not None:
++            fields["reuse"] = "CacheReusePolicyDesc{" + str(desc.reuse.enable_prefix_reuse).lower() + "}"
++        if desc.capacity is not None:
++            fields.update({"capacity": "CacheCapacityPolicyDesc{}",
++                           "capacity->explicit_block_num": desc.capacity.explicit_block_num,
++                           "capacity->charge_to_paged_budget": str(desc.capacity.charge_to_paged_budget).lower()})
++        for key, value in fields.items():
++            print(f"    {tag}.{key} = {value};")
++    print("    return {" + ", ".join(prototypes) + "};\n}")
++    for name, layers in (("target", target), ("draft", draft)):
++        print(f"inline std::vector<std::vector<std::string>> {name}Layers() {{\n    return {{")
++        for layer in layers:
++            print("        {" + ", ".join(json.dumps(d.tag) for d in layer) + "},")
++        print("    };\n}")
++    print("}  // namespace rtp_llm::benchmark::dsv41")
++
++
++if __name__ == "__main__":
++    render(sys.argv[1])
+diff --git a/rtp_llm/cpp/cache/block_tree_cache/benchmark/trace/SerialTraceReplay.cc b/rtp_llm/cpp/cache/block_tree_cache/benchmark/trace/SerialTraceReplay.cc
+new file mode 100644
+index 000000000..519b7461f
+--- /dev/null
++++ b/rtp_llm/cpp/cache/block_tree_cache/benchmark/trace/SerialTraceReplay.cc
+@@ -0,0 +1,468 @@
++#include <array>
++#include <chrono>
++#include <filesystem>
++#include <fstream>
++#include <iomanip>
++#include <iostream>
++#include <limits>
++#include <map>
++#include <thread>
++#include <cuda_runtime.h>
++#include "rtp_llm/cpp/utils/Logger.h"
++#include "rtp_llm/cpp/cache/CPSlotMapper.h"
++#include "rtp_llm/cpp/cache/CacheTopology.h"
++#include "rtp_llm/cpp/cache/FullCacheManager.h"
++#include "rtp_llm/cpp/cache/SWACacheManager.h"
++#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
++#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
++#include "rtp_llm/cpp/cache/block_tree_cache/benchmark/BenchmarkFixture.h"
++#include "rtp_llm/cpp/cache/block_tree_cache/benchmark/OnlineTreeScheduler.h"
++#include "rtp_llm/cpp/cache/block_tree_cache/benchmark/trace/TraceReader.h"
++#include "rtp_llm/cpp/cache/block_tree_cache/block_pool/HostBlockPool.h"
++#include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DiskBlockPool.h"
++#include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
++#include "rtp_llm/cpp/cache/block_tree_cache/transfer/PerRankBlockTransferEngine.h"
++using namespace rtp_llm;
++using namespace rtp_llm::benchmark;
++namespace {
++void cudaCheck(cudaError_t status) {
++    if (status != cudaSuccess)
++        throw std::runtime_error(cudaGetErrorString(status));
++}
++struct Options {
++    std::string input, output, disk_dir;
++    size_t      full_device{128}, swa_device{128}, full_host{256}, swa_host{256}, full_disk{512}, swa_disk{512};
++    size_t      last_n{4}, linear_step{4}, max_requests{1000}, payload_divisor{256}, timeout_ms{30000};
++    int         gpu{0};
++};
++Options parse(int argc, char** argv) {
++    Options                        o;
++    std::map<std::string, size_t*> sizes = {{"--full-device", &o.full_device},
++                                            {"--swa-device", &o.swa_device},
++                                            {"--full-host", &o.full_host},
++                                            {"--swa-host", &o.swa_host},
++                                            {"--full-disk", &o.full_disk},
++                                            {"--swa-disk", &o.swa_disk},
++                                            {"--last-n", &o.last_n},
++                                            {"--linear-step", &o.linear_step},
++                                            {"--max-requests", &o.max_requests},
++                                            {"--payload-divisor", &o.payload_divisor},
++                                            {"--timeout-ms", &o.timeout_ms}};
++    for (int i = 1; i < argc; i += 2) {
++        if (i + 1 >= argc)
++            throw std::runtime_error("every flag needs a value");
++        std::string k = argv[i], v = argv[i + 1];
++        if (k == "--input")
++            o.input = v;
++        else if (k == "--output")
++            o.output = v;
++        else if (k == "--disk-dir")
++            o.disk_dir = v;
++        else if (k == "--gpu")
++            o.gpu = std::stoi(v);
++        else if (sizes.count(k)) {
++            if (v.empty() || v[0] == '-')
++                throw std::runtime_error("negative option");
++            *sizes[k] = std::stoull(v);
++        } else
++            throw std::runtime_error("unknown option: " + k);
++    }
++    if (o.input.empty() || o.output.empty() || o.disk_dir.empty() || !o.full_device || !o.swa_device
++        || !o.payload_divisor || !o.timeout_ms || !o.last_n || o.last_n > 100000 || o.linear_step > 100000)
++        throw std::runtime_error("invalid required options");
++    if ((o.full_host == 0) != (o.swa_host == 0) || (o.full_disk == 0) != (o.swa_disk == 0))
++        throw std::runtime_error("FULL/SWA tier enablement must agree");
++    return o;
++}
++const std::array<std::string, 5> tags           = {"csa_kv", "hca_kv", "indexer_kv", "swa_kv", "csa_state"};
++const std::array<size_t, 5>      original_bytes = {110592, 73728, 69632, 443520, 24576};
++std::vector<uint8_t>             pattern(int64_t key, size_t member, size_t bytes) {
++    std::vector<uint8_t> data(bytes);
++    uint64_t             x = static_cast<uint64_t>(key) ^ ((member + 1) * 0x9e3779b97f4a7c15ULL);
++    for (size_t i = 0; i < bytes; ++i) {
++        x ^= x << 13;
++        x ^= x >> 7;
++        x ^= x << 17;
++        data[i] = static_cast<uint8_t>(x);
++    }
++    return data;
++}
++class AuditedTransferEngine: public PerRankBlockTransferEngine {
++public:
++    using PerRankBlockTransferEngine::PerRankBlockTransferEngine;
++    std::shared_ptr<TransferAsyncContext> execute(TransferTask task) override {
++        auto                        context = PerRankBlockTransferEngine::execute(std::move(task));
++        std::lock_guard<std::mutex> lock(mutex_);
++        contexts_.push_back(context);
++        return context;
++    }
++    void verifyCompleted() {
++        std::lock_guard<std::mutex> lock(mutex_);
++        for (const auto& context : contexts_) {
++            if (!context->done() || !context->success())
++                throw std::runtime_error("background BTC transfer incomplete or failed");
++        }
++        contexts_.clear();
++    }
++
++private:
++    std::mutex                                         mutex_;
++    std::vector<std::shared_ptr<TransferAsyncContext>> contexts_;
++};
++struct Resources {
++    std::shared_ptr<AuditedTransferEngine> engine;
++
++    std::vector<DeviceBlockPoolPtr>                      pools;
++    std::vector<std::unique_ptr<SingleTypeCacheManager>> managers;
++    std::unique_ptr<BlockTreeCache>                      cache;
++    std::array<size_t, 5>                                bytes;
++    const Options&                                       options;
++    explicit Resources(const Options& o): options(o) {
++        std::vector<std::pair<std::string, CacheGroupType>> specs;
++        std::vector<size_t>                                 strides, windows;
++        for (size_t m = 0; m < 5; ++m) {
++            bytes[m] = ((std::max<size_t>(64, original_bytes[m] / o.payload_divisor) + 63) / 64) * 64;
++            specs.push_back({tags[m], m < 3 ? CacheGroupType::FULL : CacheGroupType::SWA});
++            strides.push_back(bytes[m]);
++            windows.push_back(m < 3 ? 0 : 128);
++        }
++        auto initial = BenchmarkFixture::createTopology(specs, strides, 1024, {}, windows);
++        auto groups  = initial->groups();
++        for (auto& group : groups) {
++            group.policy.enable_prefix_reuse = true;
++            if (group.policy.group_type == CacheGroupType::SWA) {
++                group.policy.active_tail_blocks   = o.last_n;
++                group.policy.validate_tail_blocks = true;
++            }
++        }
++        auto topology = CacheTopology::create(groups, initial->layers());
++        for (size_t m = 0; m < 5; ++m)
++            pools.push_back(
++                BenchmarkFixture::createDevicePool(bytes[m], 1, m < 3 ? o.full_device : o.swa_device, tags[m], 1024));
++        std::vector<GroupSetPtr> sets;
++        for (size_t gs = 0; gs < 2; ++gs) {
++            size_t                          first = gs ? 3 : 0, last = gs ? 5 : 3, payload = 0;
++            std::vector<DeviceBlockPoolPtr> members;
++            std::vector<std::string>        names;
++            for (size_t m = first; m < last; ++m) {
++                members.push_back(pools[m]);
++                names.push_back(tags[m]);
++                payload += bytes[m];
++            }
++            auto host_count = gs ? o.swa_host : o.full_host, disk_count = gs ? o.swa_disk : o.full_disk;
++            auto host =
++                host_count ?
++                    BenchmarkFixture::createHostPool(payload, host_count, gs ? "trace_host_swa" : "trace_host_full") :
++                    nullptr;
++            auto disk = disk_count ?
++                            BenchmarkFixture::createDiskPool(
++                                payload, disk_count, o.disk_dir, gs ? "trace_disk_swa" : "trace_disk_full", true) :
++                            nullptr;
++            sets.push_back(
++                gs ? BenchmarkFixture::createSWAGroupSet(members, host, disk, gs, topology, names, 128, 1024) :
++                     BenchmarkFixture::createFullGroupSet(members, host, disk, gs, topology, names));
++        }
++        BlockTreeCacheConfig cfg;
++        cfg.enable_host_cache = o.full_host > 0;
++        cfg.enable_disk_cache = o.full_disk > 0;
++        cfg.watermark_device  = {.82, .90};
++        cfg.watermark_host    = {.90, .94};
++        cfg.watermark_disk    = {.92, .97};
++        auto reporter         = std::make_shared<BlockTreeCacheMetricsReporter>(nullptr);
++        engine                = std::make_shared<AuditedTransferEngine>(sets,
++                                                         cfg.enable_disk_cache,
++                                                         DeviceHostCopyOptions{},
++                                                         cfg.device_disk_staging_block_count,
++                                                         cfg.max_descriptors_per_transfer_batch,
++                                                         cfg.transfer_worker_count,
++                                                         cfg.transfer_queue_max_size,
++                                                         reporter);
++        auto dispatcher =
++            std::make_unique<BlockTransferDispatcher>(engine, nullptr, cfg.max_descriptors_per_transfer_batch);
++        auto tasks = std::make_unique<BlockTreeTaskPool>(4, 1000, "BTCSerialTrace");
++        cache      = std::make_unique<BlockTreeCache>(
++            std::make_unique<BlockTree>(sets), cfg, nullptr, std::move(dispatcher), std::move(tasks), reporter);
++        if (!cache->init())
++            throw std::runtime_error("cache init failed");
++        for (size_t m = 0; m < 5; ++m) {
++            if (m < 3)
++                managers.push_back(
++                    std::make_unique<FullCacheManager>(topology->group(tags[m]), pools[m], static_cast<int>(m)));
++            else
++                managers.push_back(
++                    std::make_unique<SWACacheManager>(topology->group(tags[m]),
++                                                      pools[m],
++                                                      static_cast<int>(m),
++                                                      o.linear_step ? static_cast<int>(o.linear_step) : 1));
++            managers.back()->setEvictCallback([this, m](size_t n) { return cache->evictForGroup(tags[m], n); });
++        }
++    }
++    bool drain() {
++        return boundedPendingTaskDrain(
++            [this] {
++                auto&                       dispatcher = *cache->transfer_dispatcher_;
++                std::lock_guard<std::mutex> lock(dispatcher.completion_mutex_);
++                size_t                      pending = 0;
++                for (const auto& completion : dispatcher.transfer_completions_)
++                    pending += completion.wait_for(std::chrono::seconds(0)) != std::future_status::ready;
++                return pending + static_cast<size_t>(cache->task_pool_->pending_tasks_.load());
++            },
++            std::chrono::milliseconds(options.timeout_ms));
++    }
++    void requireDrained() {
++        if (!drain())
++            throw std::runtime_error("BTC task drain timed out");
++    }
++    void checkReleased() {
++        engine->verifyCompleted();
++        for (const auto& s : cache->poolMetricsSnapshots())
++            if (s.request_ref_blocks || s.load_ref_blocks || s.store_ref_blocks || s.eviction_target_ref_blocks
++                || s.frozen_ref_blocks)
++                throw std::runtime_error("request or async resource references remain after drain");
++    }
++};
++struct RequestResources {
++    Resources&              owner;
++    std::array<BlockIds, 5> rows;
++    bool                    released{false};
++    explicit RequestResources(Resources& r): owner(r) {}
++    void release() {
++        if (released)
++            return;
++        for (size_t m = 0; m < 5; ++m) {
++            BlockIndicesType valid;
++            for (auto b : rows[m].blocks())
++                if (!isNullBlockIdx(b))
++                    valid.push_back(b);
++            if (!valid.empty())
++                owner.pools[m]->decRef(valid);
++            rows[m].assign(BlockIndicesType{});
++        }
++        released = true;
++    }
++    ~RequestResources() {
++        try {
++            release();
++        } catch (...) {}
++    }
++    void place(size_t gs, size_t pos, const BlockIndicesType& ids) {
++        const size_t offset  = gs ? 3 : 0;
++        const size_t members = gs ? 2 : 3;
++        if (ids.size() != members)
++            throw std::runtime_error("group member count mismatch");
++        for (size_t j = 0; j < members; ++j) {
++            auto& row = rows[offset + j];
++            if (row.blocksNum() <= pos)
++                row.resize(pos + 1);
++            if (!isNullBlockIdx(row.blocks()[pos]))
++                throw std::runtime_error("duplicate request ownership");
++            row.setAt(pos, ids[j]);
++        }
++    }
++};
++struct Result {
++    size_t logical{0}, effective{0}, device{0}, host{0}, disk{0};
++};
++Result process(Resources& state, const SerialTraceRequest& request) {
++    if (request.input_tokens > static_cast<uint64_t>(std::numeric_limits<int>::max()))
++        throw std::runtime_error("request too long");
++    Result           answer;
++    RequestResources held(state);
++    const auto       valid = [&](size_t n) {
++        return n * 1024 <= request.input_tokens && request.input_tokens - n * 1024 >= 128;
++    };
++    auto matched   = state.cache->match(request.keys, valid);
++    auto ticket    = matched.async_context;
++    answer.device  = matched.matched_device_blocks;
++    answer.logical = ticket ? ticket->matchedBlocks() : answer.device;
++    for (const auto& resource : matched.matched_device_resources) {
++        size_t start = answer.device - resource.node_blocks.size();
++        for (size_t i = 0; i < resource.node_blocks.size(); ++i)
++            held.place(resource.group_set_id, start + i, resource.node_blocks[i].second);
++    }
++    try {
++        if (ticket) {
++            answer.host        = ticket->matchedBlocks(Tier::HOST);
++            answer.disk        = ticket->matchedBlocks(Tier::DISK);
++            const auto& descs  = ticket->loadDescs();
++            const auto& joined = ticket->joinedLoads();
++            for (size_t d = 0; d < descs.size(); ++d) {
++                const auto& desc = descs[d];
++                if (joined[d]) {
++                    held.place(desc.group_set_id, desc.path_index, desc.target_blocks);
++                    continue;
++                }
++                if (desc.source_tier == Tier::DEVICE) {
++                    held.place(desc.group_set_id, desc.path_index, desc.source_blocks);
++                    continue;
++                }
++                const size_t     start = desc.group_set_id ? 3 : 0, end = desc.group_set_id ? 5 : 3;
++                BlockIndicesType targets;
++                for (size_t m = start; m < end; ++m) {
++                    if (state.pools[m]->freeBlocksNum() < 1)
++                        state.cache->evictForGroup(tags[m], 1);
++                    auto blocks = state.pools[m]->malloc(1);
++                    if (!blocks)
++                        throw std::runtime_error("load target allocation failed");
++                    state.pools[m]->incRef(*blocks);
++                    auto& row = held.rows[m];
++                    if (row.blocksNum() <= desc.path_index)
++                        row.resize(desc.path_index + 1);
++                    row.setAt(desc.path_index, (*blocks)[0]);
++                    targets.push_back((*blocks)[0]);
++                }
++                ticket->setTargetBlocks(d, targets);
++            }
++            if (!ticket->commit())
++                throw std::runtime_error("load commit failed");
++            const auto deadline =
++                std::chrono::steady_clock::now() + std::chrono::milliseconds(state.options.timeout_ms);
++            while (!ticket->done() && std::chrono::steady_clock::now() < deadline)
++                std::this_thread::sleep_for(std::chrono::milliseconds(1));
++            if (!ticket->done() || !ticket->success())
++                throw std::runtime_error("load failed or timed out");
++        }
++        answer.effective = answer.logical;
++        for (size_t m = 0; m < 5; ++m) {
++            for (size_t pos = 0; pos < held.rows[m].blocksNum(); ++pos) {
++                auto id = held.rows[m].blocks()[pos];
++                if (isNullBlockIdx(id))
++                    continue;
++                auto                 expected = pattern(request.keys.at(pos), m, state.bytes[m]);
++                std::vector<uint8_t> actual(expected.size());
++                auto*                addr =
++                    static_cast<uint8_t*>(state.pools[m]->getBaseAddress()) + static_cast<size_t>(id) * state.bytes[m];
++                cudaCheck(cudaMemcpy(actual.data(), addr, actual.size(), cudaMemcpyDeviceToHost));
++                if (actual != expected)
++                    throw std::runtime_error("placeholder content mismatch after match/load");
++            }
++        }
++        for (size_t m = 0; m < 5; ++m) {
++            if (held.rows[m].blocksNum() > answer.effective)
++                throw std::runtime_error("match returned resources beyond its effective prefix");
++            held.rows[m].resize(answer.effective);
++            auto before = held.rows[m].blocks();
++            if (!state.managers[m]->malloc(
++                    held.rows[m], static_cast<int>(request.input_tokens), m < 3 || state.options.linear_step > 0))
++                throw std::runtime_error("native suffix allocation failed");
++            for (size_t pos = 0; pos < held.rows[m].blocksNum(); ++pos) {
++                auto id = held.rows[m].blocks()[pos];
++                if (isNullBlockIdx(id) || (pos < before.size() && !isNullBlockIdx(before[pos])))
++                    continue;
++                auto  key  = pos < request.keys.size() ? request.keys[pos] : static_cast<int64_t>(request.timestamp_ns);
++                auto  data = pattern(key, m, state.bytes[m]);
++                auto* addr =
++                    static_cast<uint8_t*>(state.pools[m]->getBaseAddress()) + static_cast<size_t>(id) * state.bytes[m];
++                cudaCheck(cudaMemcpy(addr, data.data(), data.size(), cudaMemcpyHostToDevice));
++            }
++            state.managers[m]->removeSkippedBlocks(held.rows[m], m < 3 || state.options.linear_step > 0);
++        }
++        std::vector<std::vector<GroupSetResource>> resources(request.keys.size(), std::vector<GroupSetResource>(2));
++        for (size_t pos = 0; pos < request.keys.size(); ++pos)
++            for (size_t gs = 0; gs < 2; ++gs) {
++                size_t           first = gs ? 3 : 0, end = gs ? 5 : 3;
++                BlockIndicesType ids;
++                for (size_t m = first; m < end; ++m) {
++                    auto id = held.rows[m].blocks()[pos];
++                    if (!isNullBlockIdx(id))
++                        ids.push_back(id);
++                }
++                if (!ids.empty() && ids.size() != end - first)
++                    throw std::runtime_error("partial group assembly");
++                resources[pos][gs].device_blocks = std::move(ids);
++            }
++        state.cache->insert(request.keys, resources, Tier::DEVICE);
++        held.release();
++        state.requireDrained();
++        state.checkReleased();
++        return answer;
++    } catch (...) {
++        if (ticket && !ticket->done()) {
++            ticket->abortPending();
++            state.cache->shutdownLoads();
++        }
++        state.requireDrained();
++        held.release();
++        throw;
++    }
++}
++}  // namespace
++int main(int argc, char** argv) {
++    std::filesystem::path output;
++    bool                  output_created = false;
++    try {
++        if (!initLogger())
++            throw std::runtime_error("logger initialization failed");
++        const auto o = parse(argc, argv);
++        output       = o.output;
++        if (std::filesystem::exists(output))
++            throw std::runtime_error("output directory already exists");
++        std::filesystem::create_directories(output);
++        output_created = true;
++        if (std::filesystem::exists(o.disk_dir) && !std::filesystem::is_empty(o.disk_dir))
++            throw std::runtime_error("disk directory must be empty");
++        std::filesystem::create_directories(o.disk_dir);
++        cudaCheck(cudaSetDevice(o.gpu));
++        CPSlotMapper mapper(0, 4, 256);
++        if (mapper.virtualBlockSize() != 1024)
++            throw std::runtime_error("CP contract");
++        uint64_t      chunks, expected, expected_tokens;
++        std::ifstream done(std::filesystem::path(o.input) / "producer.done");
++        done >> chunks >> expected >> expected_tokens;
++        if (!done || !chunks || !expected)
++            throw std::runtime_error("input completion marker missing");
++        Resources     state(o);
++        uint64_t      count = 0, tokens = 0, reused = 0, last = 0;
++        std::ofstream per(output / "requests.jsonl");
++        for (uint64_t c = 0; c < chunks && (o.max_requests == 0 || count < o.max_requests); ++c) {
++            std::ostringstream filename;
++            filename << std::setw(6) << std::setfill('0') << c << ".bin";
++            std::ifstream      input(std::filesystem::path(o.input) / "chunks" / filename.str(), std::ios::binary);
++            TraceChunkReader   reader(input, 1024);
++            SerialTraceRequest request;
++            while ((o.max_requests == 0 || count < o.max_requests) && reader.next(request)) {
++                if (request.timestamp_ns < last)
++                    throw std::runtime_error("trace order violation");
++                last         = request.timestamp_ns;
++                const auto r = process(state, request);
++                ++count;
++                tokens += request.input_tokens;
++                reused += r.effective * 1024;
++                per << "{\"ordinal\":" << count << ",\"timestamp_ns\":" << request.timestamp_ns
++                    << ",\"input_tokens\":" << request.input_tokens << ",\"logical_match_blocks\":" << r.logical
++                    << ",\"effective_hit_blocks\":" << r.effective << ",\"device_prefix_blocks\":" << r.device
++                    << ",\"host_match_blocks\":" << r.host << ",\"disk_match_blocks\":" << r.disk << "}\n";
++                if (!per)
++                    throw std::runtime_error("request output failed");
++                if (count % 1000 == 0) {
++                    per.flush();
++                    std::cerr << "completed_requests=" << count << " input_tokens=" << tokens << std::endl;
++                }
++            }
++        }
++        state.requireDrained();
++        state.checkReleased();
++        const auto expected_count = o.max_requests ? std::min<uint64_t>(expected, o.max_requests) : expected;
++        if (count != expected_count || (count == expected && tokens != expected_tokens))
++            throw std::runtime_error("full cohort mismatch");
++        per.close();
++        std::ofstream summary(output / "summary.json");
++        summary
++            << std::setprecision(17) << "{\"complete\":true,\"requests\":" << count << ",\"input_tokens\":" << tokens
++            << ",\"effective_hit_tokens\":" << reused << ",\"hit_rate\":" << (tokens ? double(reused) / tokens : 0)
++            << ",\"cp_size\":4,\"base_tokens\":256,\"canonical_tokens\":1024,\"linear_step\":" << o.linear_step
++            << ",\"last_n\":" << o.last_n << ",\"payload_divisor\":" << o.payload_divisor
++            << ",\"serial\":true,\"physical_rank_processes\":1,\"placeholder_content_verified\":true,\"request_refs_zero\":true}\n";
++        summary.close();
++        if (!summary)
++            throw std::runtime_error("summary write");
++        return 0;
++    } catch (const std::exception& e) {
++        std::cerr << "FAIL: " << e.what() << std::endl;
++        if (output_created) {
++            std::ofstream f(output / "FAILED.txt");
++            f << e.what() << '\n';
++        }
++        return 1;
++    }
++}
+diff --git a/rtp_llm/cpp/cache/block_tree_cache/benchmark/trace/TraceReader.h b/rtp_llm/cpp/cache/block_tree_cache/benchmark/trace/TraceReader.h
+new file mode 100644
+index 000000000..183641681
+--- /dev/null
++++ b/rtp_llm/cpp/cache/block_tree_cache/benchmark/trace/TraceReader.h
+@@ -0,0 +1,65 @@
++#pragma once
++#include <cstdint>
++#include <cstring>
++#include <istream>
++#include <stdexcept>
++#include <vector>
++namespace rtp_llm::benchmark {
++struct SerialTraceRequest {
++    uint64_t             timestamp_ns{0};
++    uint64_t             input_tokens{0};
++    std::vector<int64_t> keys;
++};
++class TraceChunkReader {
++public:
++    TraceChunkReader(std::istream& input, uint32_t tokens_per_key): input_(input), tokens_per_key_(tokens_per_key) {
++        uint16_t endian = 1;
++        if (*reinterpret_cast<char*>(&endian) != 1 || tokens_per_key == 0) {
++            throw std::runtime_error("trace requires little endian and a positive token stride");
++        }
++        char magic[8];
++        input_.read(magic, 8);
++        if (!input_ || std::memcmp(magic, "FNLAST01", 8)) {
++            throw std::runtime_error("unsupported trace format");
++        }
++        (void)read<uint64_t>();
++        remaining_ = read<uint64_t>();
++    }
++    bool next(SerialTraceRequest& request) {
++        if (!remaining_) {
++            if (input_.peek() != std::char_traits<char>::eof()) {
++                throw std::runtime_error("trailing trace bytes");
++            }
++            return false;
++        }
++        request.timestamp_ns = read<uint64_t>();
++        request.input_tokens = read<uint64_t>();
++        const auto count     = read<uint32_t>();
++        (void)read<uint32_t>();  // Prior theoretical hit is never a BTC input.
++        if (!request.input_tokens || count != request.input_tokens / tokens_per_key_ || count > 1048576) {
++            throw std::runtime_error("trace token/key dimensions do not match configured canonical stride");
++        }
++        request.keys.resize(count);
++        input_.read(reinterpret_cast<char*>(request.keys.data()), count * sizeof(int64_t));
++        if (!input_) {
++            throw std::runtime_error("truncated trace keys");
++        }
++        --remaining_;
++        return true;
++    }
++
++private:
++    template<class T>
++    T read() {
++        T value;
++        input_.read(reinterpret_cast<char*>(&value), sizeof(value));
++        if (!input_) {
++            throw std::runtime_error("truncated trace record");
++        }
++        return value;
++    }
++    std::istream& input_;
++    uint32_t      tokens_per_key_;
++    uint64_t      remaining_{0};
++};
++}  // namespace rtp_llm::benchmark
+diff --git a/rtp_llm/cpp/cache/block_tree_cache/benchmark/trace/TraceReaderTest.cc b/rtp_llm/cpp/cache/block_tree_cache/benchmark/trace/TraceReaderTest.cc
+new file mode 100644
+index 000000000..680d91ec3
+--- /dev/null
++++ b/rtp_llm/cpp/cache/block_tree_cache/benchmark/trace/TraceReaderTest.cc
+@@ -0,0 +1,64 @@
++#include <cstring>
++#include <sstream>
++#include <stdexcept>
++#include "rtp_llm/cpp/cache/block_tree_cache/benchmark/trace/TraceReader.h"
++using namespace rtp_llm::benchmark;
++void require(bool condition) {
++    if (!condition)
++        throw std::runtime_error("test assertion failed");
++}
++template<class T>
++void put(std::ostream& s, T v) {
++    s.write(reinterpret_cast<const char*>(&v), sizeof(v));
++}
++int main() {
++    std::stringstream s;
++    s.write("FNLAST01", 8);
++    put(s, uint64_t(0));
++    put(s, uint64_t(2));
++    put(s, uint64_t(1));
++    put(s, uint64_t(2057));
++    put(s, uint32_t(2));
++    put(s, uint32_t(0));
++    put(s, int64_t(-3));
++    put(s, int64_t(7));
++    put(s, uint64_t(2));
++    put(s, uint64_t(17));
++    put(s, uint32_t(0));
++    put(s, uint32_t(0));
++    TraceChunkReader   reader(s, 1024);
++    SerialTraceRequest r;
++    require(reader.next(r));
++    require(r.input_tokens == 2057 && r.keys[0] == -3 && r.keys[1] == 7);
++    require(reader.next(r) && r.keys.empty() && r.input_tokens == 17);
++    require(!reader.next(r));
++    auto truncated = s.str();
++    truncated.pop_back();
++    std::stringstream bad(truncated);
++    bool              failed = false;
++    try {
++        TraceChunkReader t(bad, 1024);
++        while (t.next(r)) {};
++    } catch (const std::runtime_error&) {
++        failed = true;
++    }
++    require(failed);
++    std::stringstream wrong(s.str());
++    failed = false;
++    try {
++        TraceChunkReader t(wrong, 256);
++        t.next(r);
++    } catch (const std::runtime_error&) {
++        failed = true;
++    }
++    require(failed);
++    std::stringstream extra(s.str() + "x");
++    failed = false;
++    try {
++        TraceChunkReader t(extra, 1024);
++        while (t.next(r)) {};
++    } catch (const std::runtime_error&) {
++        failed = true;
++    }
++    require(failed);
++}

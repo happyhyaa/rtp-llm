@@ -1,0 +1,152 @@
+{
+  "archive_date": "2026-11-09",
+  "baseline_branch": "feature/dsv41-dev-main-202161013",
+  "baseline_commit": "a3fdca664089a44769b1d8c220ea0141fd55731f",
+  "snapshot_source": "local November 6 noon-version metadata replay checkout",
+  "source_files": {
+    "rtp_llm/cpp/cache/CacheConfig.h": {
+      "sha256": "6a275722a3338564b06b54732bc75cd2f1eb89c45d81a15f5aa4764eb57ad300",
+      "bytes": 8291
+    },
+    "rtp_llm/cpp/cache/CoordinatorCacheManager.cc": {
+      "sha256": "dc58878929cb3ce559c69f8c7fff3bf6594d19436e1a6905dcc3f6c74539cdfe",
+      "bytes": 122864
+    },
+    "rtp_llm/cpp/cache/SingleTypeCacheManager.cc": {
+      "sha256": "dd31ce4974f98d9879d76c730945c483d778b08ec17badaade16bfa5eef7ce34",
+      "bytes": 6658
+    },
+    "rtp_llm/cpp/cache/block_tree_cache/BUILD": {
+      "sha256": "7d7f1109f47b407761afa88650a6e77f51c81fa679f7d103af5d4f032ca7e438",
+      "bytes": 7311
+    },
+    "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.cc": {
+      "sha256": "e5430c33ac9412a4f541aac7976b2fbf8ffefc9080aae6305f698c277d67ef46",
+      "bytes": 12571
+    },
+    "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheFactory.cc": {
+      "sha256": "797c672a291a04299a5c4bfb1caa32bb95c2cb0834ae0a7d2419a849986b79b3",
+      "bytes": 42749
+    },
+    "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheMetricsReporter.cc": {
+      "sha256": "e48002f6cf5fa45cd48d662a1d84d0fdb2655aef9aa06ad06d4cdfd07fc5c494",
+      "bytes": 31773
+    },
+    "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheMetricsReporter.h": {
+      "sha256": "dc284bf7838600c259a74477bc057eb9c8b46c7462f37d05f16de44ba5d8f2d1",
+      "bytes": 10284
+    },
+    "rtp_llm/cpp/cache/block_tree_cache/BlockTreeGroupLayout.h": {
+      "sha256": "2afefcbae0ea6fc1c35681e9a69148cbb3930f81c2ac34b24e1c99f95734b7c4",
+      "bytes": 3984
+    },
+    "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h": {
+      "sha256": "4043efb21ee018a93d81bb29e967a73dccbd454aa01d03a44c483e615da1b7f9",
+      "bytes": 3404
+    },
+    "rtp_llm/cpp/cache/block_tree_cache/benchmark/BUILD": {
+      "sha256": "6c95853143dbd62e8c209b2129e993f33b9c0f62257dcb2753f285de2306d357",
+      "bytes": 10802
+    },
+    "rtp_llm/cpp/cache/block_tree_cache/benchmark/metadata/Dsv41Profile.h": {
+      "sha256": "e84b7341ac03e49e156765c78321d8007ce2fe2b8e08a57e75d36d1f13182664",
+      "bytes": 6914
+    },
+    "rtp_llm/cpp/cache/block_tree_cache/benchmark/metadata/MetadataPoolTest.cc": {
+      "sha256": "d56b6abdc6e352247cec2aaceda22cd2bb19ff26a0bf826cfbef75e76ffaa508",
+      "bytes": 4091
+    },
+    "rtp_llm/cpp/cache/block_tree_cache/benchmark/metadata/MetadataReplay.cc": {
+      "sha256": "63eba384ab12f8204310bb4010486c18493c66595f68767c51832f371d896966",
+      "bytes": 28429
+    },
+    "rtp_llm/cpp/cache/block_tree_cache/benchmark/metadata/MetadataReplay.h": {
+      "sha256": "2b6f1d33252ac1b9ea71fd0cb13f2c0daeb19fe0d8626dc1198d775d3a07badd",
+      "bytes": 1936
+    },
+    "rtp_llm/cpp/cache/block_tree_cache/benchmark/metadata/MetadataReplayMain.cc": {
+      "sha256": "8f9a6f812e427670ed4e9de72cacac70e198d13fc01ef27603ef6354365277c7",
+      "bytes": 15526
+    },
+    "rtp_llm/cpp/cache/block_tree_cache/benchmark/metadata/MetadataReplayTest.cc": {
+      "sha256": "b626bf21c97ca0e0d2b5eec543b0cc5637bbe3149fb676676e2f799ca8a0ce10",
+      "bytes": 2681
+    },
+    "rtp_llm/cpp/cache/block_tree_cache/benchmark/metadata/NoPayloadOps.cc": {
+      "sha256": "22d536cb6f5724b7e290c487df96fa99da3664be33b63f0dbafce821784b2b25",
+      "bytes": 519
+    },
+    "rtp_llm/cpp/cache/block_tree_cache/benchmark/metadata/ResidentReplayMain.cc": {
+      "sha256": "9ea25d601f97d6e1f22e64715df469aa57d37d23ac7f86233f8f833845950af0",
+      "bytes": 9990
+    },
+    "rtp_llm/cpp/cache/block_tree_cache/benchmark/metadata/export_dsv41_profile.py": {
+      "sha256": "556af771648c4eac318777a59f30069aa9ac58005565d860f522406dd00bba86",
+      "bytes": 3965
+    },
+    "rtp_llm/cpp/cache/block_tree_cache/benchmark/trace/SerialTraceReplay.cc": {
+      "sha256": "8582dfdf54ca51c1e41993e93d16318e2c50ccf10a1ad2f7106a8f9176ed2c32",
+      "bytes": 23723
+    },
+    "rtp_llm/cpp/cache/block_tree_cache/benchmark/trace/TraceReader.h": {
+      "sha256": "2a76f883666e6b9e0a1d7f929799b9348047c9ce6b96a15ac3dad0c5180a03cd",
+      "bytes": 2286
+    },
+    "rtp_llm/cpp/cache/block_tree_cache/benchmark/trace/TraceReaderTest.cc": {
+      "sha256": "5fb28daba1ceea828cb11297a5824be7021e1c259e502b58973881459ad9e4a4",
+      "bytes": 1795
+    },
+    "rtp_llm/cpp/cache/block_tree_cache/block_pool/DeviceBlockPool.cc": {
+      "sha256": "630ed2db2b963644a504ad8218c61846e6a3d4c21e7ce861cefaf0be95a40d71",
+      "bytes": 40677
+    },
+    "rtp_llm/cpp/cache/block_tree_cache/block_pool/DeviceBlockPool.h": {
+      "sha256": "3f3ba2906bd6db208e1874bbacd4af1f86be416edc6920abb7c83f366564522f",
+      "bytes": 8957
+    },
+    "rtp_llm/cpp/cache/block_tree_cache/block_pool/DiskBlockPool.cc": {
+      "sha256": "233786e9cca743cca3209bcaf1ff55ef7d194820fcc65d41ec91771a8ddf5228",
+      "bytes": 9948
+    },
+    "rtp_llm/cpp/cache/block_tree_cache/block_pool/HostBlockPool.cc": {
+      "sha256": "10f30536fbbd46fc053b6fe7c7169d346ef60356a495e1ec6106de20d4ba1351",
+      "bytes": 6083
+    },
+    "rtp_llm/cpp/cache/block_tree_cache/block_pool/HostBlockPool.h": {
+      "sha256": "74273e87c435e31514dad5eadeaa41f1b7bf68274d819413e0d0ab6a0de65b85",
+      "bytes": 1881
+    },
+    "rtp_llm/cpp/cache/block_tree_cache/block_pool/IBlockPool.h": {
+      "sha256": "28578bd151a0142922eb1a378d171575bfb346ed9d213fcfaae8b5f03e1d7889",
+      "bytes": 8249
+    },
+    "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.cc": {
+      "sha256": "3350a208acf2ea5ad53fe01c7b88cde4f8844da42bec5f1442fcf1ad51655167",
+      "bytes": 8850
+    },
+    "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h": {
+      "sha256": "5ec131cad545d4626b1d119a97cae64233ced3954449bfa4784c6b58c0921ed4",
+      "bytes": 2753
+    },
+    "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.cc": {
+      "sha256": "af9e62ad36ab984cca30a3304b15b0959d7fe82818767d2d31a313b57ff3a642",
+      "bytes": 12565
+    },
+    "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h": {
+      "sha256": "1561858cfd4c88f8f170d61e978297572510239af299da9d1aa2edad82738440",
+      "bytes": 2937
+    }
+  },
+  "source_patch_sha256": "5455a21921610c280560225802746c09b15f7ca1fbebc6459db393f03f1031ff",
+  "execution_status": "archival packaging only; no remote build or replay run during packaging",
+  "runtime_scope": "prefill-only serial requests, native BTC metadata lifecycle, no KV payload or GPU execution",
+  "resume": "resident process hold only; restartable checkpoint absent",
+  "not_implemented": [
+    "F/J match-length distributions and time series",
+    "persistent historical match-endpoint index",
+    "standardized checkpoint export/import",
+    "transmission-free build dependency split",
+    "global LRU strategy"
+  ],
+  "historical_operations": "deployment identifiers redacted; source byte audit applies to legacy/source only"
+}

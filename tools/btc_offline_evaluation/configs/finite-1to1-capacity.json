@@ -1,0 +1,31 @@
+{
+  "scope": "capacity-only specification; remaining model and routing settings must be resolved separately",
+  "source": "historical CP4 finite-capacity experiment",
+  "capacity_basis": "historical per-rank budget snapshot; Disk experiment budget 2 TiB/rank",
+  "unit": "usable blocks per rank; reserved block zero excluded",
+  "ratio": "FULL:SWA=1:1 by block count within each tier",
+  "tiers": {
+    "device": {
+      "full": 35565,
+      "swa": 35565
+    },
+    "host": {
+      "full": 166544,
+      "swa": 166544
+    },
+    "disk": {
+      "full": 3016127,
+      "swa": 3016127
+    }
+  },
+  "theory_collapsed": {
+    "full": 3218236,
+    "swa": 3218236
+  },
+  "btc_capacity_fields": {
+    "device_blocks": 35565,
+    "swa_blocks": 35565,
+    "host_blocks": 166544,
+    "disk_blocks": 3016127
+  }
+}

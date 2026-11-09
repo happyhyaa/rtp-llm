@@ -1,0 +1,209 @@
+#pragma once
+
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <vector>
+
+#include "rtp_llm/cpp/cache/Types.h"
+#include "rtp_llm/cpp/utils/AssertUtils.h"
+#include "rtp_llm/cpp/utils/PhysicalDecodeOrigins.h"
+
+namespace rtp_llm {
+
+using BlockIdList = std::vector<BlockIdxType>;
+
+enum class BlockPoolType {
+    DEVICE,
+    HOST,
+    DISK,
+};
+
+enum class BlockTreeRefType : uint8_t {
+    CACHE = 0,
+    LOAD,
+    EVICTION,
+    STORE,
+    FROZEN,
+    COUNT,
+};
+
+constexpr size_t kBlockTreeRefTypeCount = static_cast<size_t>(BlockTreeRefType::COUNT);
+
+struct BlockPoolConfigBase {
+    virtual ~BlockPoolConfigBase() = default;
+
+    BlockPoolType pool_type{BlockPoolType::DEVICE};
+    std::string   pool_name;
+    size_t        physical_block_count{0};
+    // Offline metadata replay: retain capacity/refcounts without KV payload backing.
+    bool metadata_only{false};
+};
+
+// IBlockPool owns allocation and Tree-internal lifetime shared by Device, Host, and Disk.
+// DeviceBlockPool adds request-like outer ownership through the protected Tree edge hooks.
+class IBlockPool {
+public:
+    virtual ~IBlockPool() = default;
+
+    void setCapacityChangeCallback(std::function<void()> callback);
+
+    bool metadataOnly() const {
+        return config_->metadata_only;
+    }
+    const std::string&  poolName() const;
+    virtual std::string debugString() const;
+    virtual size_t      blockSizeBytes() const = 0;
+
+    std::optional<BlockIdxType> malloc();
+    std::optional<BlockIdList>  malloc(size_t n);
+
+    void     incTreeRef(BlockIdxType block, BlockTreeRefType ref_type);
+    void     incTreeRef(const BlockIdList& blocks, BlockTreeRefType ref_type);
+    void     decTreeRef(BlockIdxType block, BlockTreeRefType ref_type);
+    void     decTreeRef(const BlockIdList& blocks, BlockTreeRefType ref_type);
+    uint32_t treeRefCount(BlockIdxType block) const;
+
+    // True when releasing one CACHE reference would immediately free the block.
+    // Checks tree and external ownership together under the pool mutex.
+    bool canReclaimCacheBlock(BlockIdxType block) const;
+
+    // Add one FROZEN reference; the caller decides when to release its hold.
+    void freezeBlock(BlockIdxType block) noexcept;
+    bool isFrozen(BlockIdxType block) const;
+
+    // Number of distinct blocks carrying at least one tree reference of this type.
+    size_t referencedBlocksNum(BlockTreeRefType ref_type) const;
+
+    bool validBlock(BlockIdxType block) const;
+    bool isAllocated(BlockIdxType block) const;
+
+    // Optional source metadata bound to the exact physical allocation. All
+    // operations use mutex_; callers never hold a raw pointer into this table.
+    bool                          enableDecodeOriginTracking();
+    uint64_t                      decodeOriginIncarnation(BlockIdxType block) const;
+    PhysicalDecodeOrigins::Origin decodeOrigin(BlockIdxType block, std::string_view region) const;
+    bool                          bindDecodeOrigin(BlockIdxType                  block,
+                                                   uint64_t                      expected_incarnation,
+                                                   std::string_view              region,
+                                                   PhysicalDecodeOrigins::Origin origin);
+
+    size_t totalBlocksNum() const;
+    size_t freeBlocksNum() const;
+    // Blocks that can be reclaimed for a new request: physical free blocks plus
+    // blocks held exclusively by BlockTreeRefType::CACHE.
+    size_t availableBlocksNum() const;
+    size_t usedBlocksNum() const;
+    size_t activeBlocksNum() const;
+
+protected:
+    explicit IBlockPool(std::shared_ptr<const BlockPoolConfigBase> config);
+
+    void markInitialized();
+    bool initialized() const;
+
+    virtual void onFirstTreeRefNoLock(BlockIdxType) {}
+    virtual bool onLastTreeRefNoLock(BlockIdxType) {
+        return true;
+    }
+    virtual bool hasExternalRefNoLock(BlockIdxType) const {
+        return false;
+    }
+
+    template<typename Validator, typename Mutator>
+    void mutateAllocatedBlocks(const BlockIdList& blocks, Validator&& validate, Mutator&& mutate) {
+        std::function<void()> notify;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            checkInitializedNoLock();
+            if (blocks.empty()) {
+                return;
+            }
+            checkUniqueBlocksNoLock(blocks);
+            for (const auto block : blocks) {
+                checkAllocatedNoLock(block);
+                validate(block);
+            }
+            const auto free_before      = availableFreeBlocksNoLock();
+            const auto available_before = available_blocks_num_;
+            for (const auto block : blocks) {
+                mutate(block);
+            }
+            if (availableFreeBlocksNoLock() > free_before || available_blocks_num_ > available_before) {
+                notify = capacity_change_callback_;
+            }
+        }
+        if (notify) {
+            notify();
+        }
+    }
+
+    // Helpers for derived-pool transactions; the caller holds mutex_.
+    std::optional<BlockIdList> mallocNoLock(size_t n);
+    size_t                     availableFreeBlocksNoLock() const;
+    void                       reserveReleasedBlocksNoLock(size_t additional) {
+        released_blocks_.reserve(released_blocks_.size() + additional);
+    }
+    void reserveAllReleasedBlocksNoLock() {
+        released_blocks_.reserve(totalBlocksNumNoLock());
+    }
+    std::function<void()> capacityChangeCallbackNoLock() const {
+        return capacity_change_callback_;
+    }
+
+    void     checkInitializedNoLock() const;
+    void     checkAllocatedNoLock(BlockIdxType block) const;
+    uint32_t treeRefCountNoLock(BlockIdxType block) const;
+    uint32_t treeRefCountNoLock(BlockIdxType block, BlockTreeRefType ref_type) const;
+    bool     isActiveNoLock(BlockIdxType block) const;
+    bool     isAvailableNoLock(BlockIdxType block) const;
+    void     updateActiveBlocksNumNoLock(BlockIdxType block, bool was_active);
+    void     updateAvailableBlocksNumNoLock(BlockIdxType block, bool was_available);
+    void     freeAllocatedBlockNoLock(BlockIdxType block);
+    void     beginDecodeOriginIncarnationNoLock(BlockIdxType block) {
+        if (decode_origins_)
+            decode_origins_->beginAllocation(block);
+    }
+
+    mutable std::mutex mutex_;
+
+    template<typename ConfigT>
+    const ConfigT& configAs(BlockPoolType expected_type) const {
+        RTP_LLM_CHECK(config_->pool_type == expected_type);
+        return static_cast<const ConfigT&>(*config_);
+    }
+
+private:
+    bool          validBlockNoLock(BlockIdxType block) const;
+    void          checkUniqueBlocksNoLock(const BlockIdList& blocks) const;
+    static size_t treeRefTypeIndex(BlockTreeRefType ref_type);
+    void          incTreeRefNoLock(BlockIdxType block, size_t ref_type_index);
+
+    size_t       totalBlocksNumNoLock() const;
+    void         refillAscendingFreeBlocksNoLock();
+    BlockIdxType popFreeBlockNoLock();
+    void         pushFreeBlockNoLock(BlockIdxType block);
+
+private:
+    std::shared_ptr<const BlockPoolConfigBase>                config_;
+    bool                                                      initialized_{false};
+    std::function<void()>                                     capacity_change_callback_;
+    std::vector<uint8_t>                                      allocated_;
+    std::unique_ptr<PhysicalDecodeOrigins>                    decode_origins_;
+    std::vector<uint32_t>                                     tree_refcounts_;
+    std::array<std::vector<uint32_t>, kBlockTreeRefTypeCount> tree_refcounts_by_type_;
+    std::array<size_t, kBlockTreeRefTypeCount>                tree_referenced_block_counts_{};
+    std::vector<BlockIdxType>                                 free_blocks_;
+    std::vector<BlockIdxType>                                 released_blocks_;
+    size_t                                                    free_head_{0};
+    size_t                                                    active_blocks_num_{0};
+    size_t                                                    available_blocks_num_{0};
+};
+
+}  // namespace rtp_llm
