@@ -41,9 +41,10 @@ def with_charts(summary, runs):
     for i, (label, directory) in enumerate(runs, 1):
         detail = (directory / "report/report.html").read_text(encoding="utf-8")
         if i == 1:
-            css = detail.split("<style>", 1)[1].split("</style>", 1)[0]
+            layout = detail.split("<main>", 1)[0] + "<main>"
         body = detail.split("<main>", 1)[1].split("</main>", 1)[0]
-        body = body.split("</h1>", 1)[1]
+        if i > 1:
+            body = body.split("</h1>", 1)[1]
         prefix = f"run-{i}-"
         def link(match):
             attr, value = match.groups()
@@ -57,11 +58,9 @@ def with_charts(summary, runs):
         body = re.sub(r'\b(id|href|src)="([^"]*)"', link, body)
         name = {"continuous":"连续回放","resumed":"断点续跑"}.get(label.split("/")[-1], label)
         if i == 1:
-            groups.append(f"<h2>{escape(name)}</h2>" + body)
+            groups.append(body)
         else:
             groups.append(f"<details><summary>{escape(name)} · 完整分析图表</summary>{body}</details>")
-    start = summary.index("<h1>")
-    intro = summary[start:summary.index("</html>")]
-    return ('<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" '
-            'content="width=device-width,initial-scale=1"><title>BTC 离线命中率评估</title><style>' + css +
-            '</style><main>' + intro + ''.join(groups) + '</main></html>')
+    comparison = summary.split("</h1>", 1)[1].split("</html>", 1)[0]
+    appendix = "<section><details><summary>各组命中率对照与回收明细</summary>" + comparison + "</details></section>"
+    return layout + "".join(groups) + appendix + "</main></body></html>"
