@@ -10,7 +10,7 @@ description: 用有序的请求日志复现 BTC prefill KVCache 命中率。用�
 JSONL 每行是一条请求。下面是一条合成的 prefill 请求，假设数据源每 256 个 token 记录一个原始块 hash。
 
 ```json
-{"request_id":"example-001","timestamp":1793000000.125,"input_length":513,"input_block_hash_ids":["0000000000000065","00000000000000ca"]}
+{"request_id":"example-001","block_tokens":256,"timestamp":1793000000.125,"input_length":513,"input_block_hash_ids":["0000000000000065","00000000000000ca"]}
 ```
 
 - `request_id` 是请求标识字符串。`timestamp` 是请求到达的 Unix 秒数，支持小数；样本对应 `1793000000125000000` 纳秒。
@@ -28,3 +28,5 @@ JSONL 每行是一条请求。下面是一条合成的 prefill 请求，假设�
 用 scripts/analyze.py --html report.html 对照多组结果，第一个目录作为达标率基准。报告统计区间、输入 token 总数、FULL 与联合命中率，并标明配置与后端版本。逐请求文件仅包含本次执行新增的记录。
 
 [使用说明、命令及输入输出契约](references/usage.md)
+
+默认每个转换文件保存 1,000,000 条请求；最后一个文件保留余数。预处理输出显示粒度、hash 类型与判定来源。

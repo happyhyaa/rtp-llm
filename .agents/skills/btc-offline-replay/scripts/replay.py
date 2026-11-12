@@ -5,8 +5,8 @@ import struct
 import subprocess
 from pathlib import Path
 
-from prepare import CHUNK, digest
-from bundles import unpack
+from prepare import digest
+from bundles import legacy_view, unpack
 from tempfile import TemporaryDirectory
 
 
@@ -51,8 +51,14 @@ def main(a, scratch):
     for i, c in enumerate(trace["chunks"]):
         if c["file"] != f"{i:06}.btcbin" or digest(a.data / c["file"]) != c["sha256"]:
             raise ValueError(f"chunk {i} failed identity check")
-        if i + 1 < len(trace["chunks"]) and c["requests"] != CHUNK:
-            raise ValueError("non-final chunk must contain 100000 records")
+        with (a.data / c["file"]).open("rb") as stream:
+            magic, base, count, tokens, name_len = struct.unpack("<8sIQQI", stream.read(32))
+            if (magic, base, count, tokens) != (b"BTCPFX01", trace["base_tokens"], c["requests"], c["input_tokens"]):
+                raise ValueError(f"chunk {i} header differs from manifest")
+            if name_len > 1048576 or stream.read(name_len).decode() != trace["instance_id"]:
+                raise ValueError(f"chunk {i} cache domain mismatch")
+    if sum(c["requests"] for c in trace["chunks"]) != trace["requests"]:
+        raise ValueError("trace request total mismatch")
     if a.warmup < 0 or a.measure < 1 or a.stop is not None and not 0 < a.stop <= a.measure:
         raise ValueError("invalid replay range")
     if a.warmup + a.measure > trace["requests"]:
@@ -60,6 +66,16 @@ def main(a, scratch):
     end = a.stop or a.measure
     expected = prefix(a.data, trace["chunks"], a.warmup + end) - prefix(a.data, trace["chunks"], a.warmup)
     binary = a.backend.resolve(strict=True)
+    if trace["base_tokens"] != 256 or any(
+        c["requests"] != 100000 for c in trace["chunks"][:-1]
+    ) or trace["chunks"][-1]["requests"] > 100000:
+        probe = subprocess.run([str(binary), "--btcpfx-reader-version"], capture_output=True, text=True)
+        if probe.returncode or probe.stdout.strip() != "2":
+            if trace["base_tokens"] != 256:
+                raise ValueError("legacy backend supports only 256 tokens/block; rebuild the header-driven reader")
+            view = scratch / "legacy-view"
+            legacy_view(a.data, trace["chunks"], view, trace["base_tokens"], trace["instance_id"])
+            a.data = view
     config = a.config.read_bytes()
     identity = dict(trace_sha256=digest(manifest), backend_sha256=digest(binary),
                     config_sha256=digest(a.config), revision=a.revision, warmup=a.warmup, measure=a.measure)
