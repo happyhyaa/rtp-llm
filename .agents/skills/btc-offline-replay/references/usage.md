@@ -18,7 +18,7 @@ python3 "$S/prepare.py" part01.jsonl.zst part02.jsonl.zst \
 {"request_id":"r1","timestamp_ns":1000000000,"input_len":513,"block_tokens":256,"key_form":"prefix","keys":[101,202],"instance_id":"shared"}
 ```
 
-输出采用 BTCPFX01。原生后端按每 100,000 条和固定序号读取逻辑分片，以 000000.btcbin 开始。默认每 10 片集中存一个 tar，即每百万请求一个文件。通过 --chunks-per-bundle 调节，每包 1 片时保留独立 btcbin。回放当前会在临时目录解包再校验；用 TMPDIR 指向有足够空间的本地盘，多组并行时按每个进程的解包量预留空间。manifest.json 记录每片请求数、输入 token 总数和 SHA-256。块序列保持全局基础粒度。业务侧已做 CP 抽样的输入需要与后端另行对齐，重复抽样会改变结果。
+输出采用 BTCPFX01。默认每百万条一个原生 .btcbin，以实际记录数定位。支持 header-driven v2 的后端直接读取；旧版 256-token 后端按需生成临时 10 万条兼容视图。manifest.json 记录每片请求数、输入 token 总数和 SHA-256。块序列保持全局基础粒度。业务侧已做 CP 抽样的输入需要与后端另行对齐，重复抽样会改变结果。
 
 ## 2. 使用待测版本的原生后端
 
@@ -55,7 +55,7 @@ FULL 命中率 = FULL 命中 token 总数 / 全部正式输入 token 总数；�
 
 ## 日志字段与自动判定
 
---base-tokens 表示日志中每个完整 hash 对应的 token 数。省略时读取首条记录的 block_tokens；缺少声明时从生产端确认并传参。元数据池每块字节数和 CP 映射由后端配置决定。
+从日志字段 block_tokens 读取粒度；缺字段时，百炼输入采样长度与 hash 数求唯一粒度。--base-tokens 只能核对，不能覆盖或替代缺失证据。
 
 百炼输入省略 --hash-mode 时先读取 key_form。没有声明时，检查首个文件最多一万条请求、保存最多 65,536 个不同块的前驱：若同一 key 出现在不同前驱之后（包括起点），在同一命名空间、相同算法且无碰撞的假设下可判定为 raw。无法区分时要求提供来源声明。手工指定与记录声明冲突会报错。混合来源应分开转换；这项抽样不能认证整个数据集的生产方式。
 
@@ -79,3 +79,5 @@ python3 "$S/analyze.py" baseline/run-1m candidate/run-1m --cases 10 --html repor
 ```
 
 HTML 可离线打开，包含预热与正式区间、各组 FULL/联合命中率、达标率和回收计数器。--cases 会增加本阶段变长、变短和损失最大的请求。
+
+默认每个转换文件保存 1,000,000 条请求；最后一个文件保留余数。预处理输出显示粒度、hash 类型与判定来源。

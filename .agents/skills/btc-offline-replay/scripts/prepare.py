@@ -13,9 +13,7 @@ from decimal import Decimal
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from bundles import bundle
-
-CHUNK = 100000
+CHUNK = 1_000_000
 MASK = (1 << 64) - 1
 
 
@@ -70,17 +68,42 @@ def bailian(row, base, mode):
 def resolve_format(args):
     """A repeated key with distinct predecessor identities contradicts prefix hashing."""
     from itertools import islice
-    base = args.base_tokens
     mode = args.hash_mode
     with lines(args.inputs[0], sample=True) as stream:
         row = json.loads(next(stream), parse_float=Decimal)
-    producer = row.get("block_tokens")
-    source_base = 256 if args.format == "bailian" else producer
-    if type(source_base) is not int or source_base < 1:
-        raise ValueError("normalized source must declare block_tokens")
-    if any(value is not None and value != source_base for value in (base, producer)):
-        raise ValueError(f"block size conflicts with source: expected {source_base} tokens")
-    base = source_base
+    base = row.get("block_tokens")
+    args.base_evidence = "log field block_tokens"
+    if base is None and args.format == "bailian":
+        # A producer may include or omit a key for the incomplete tail.
+        low, high = 1, 2**31 - 1
+        for path in args.inputs:
+            with lines(path, sample=True) as stream:
+                for line in islice(stream, 10000):
+                    record = json.loads(line)
+                    length = record["input_length"]
+                    count = len(record["input_block_hash_ids"])
+                    if type(length) is not int or length <= 0:
+                        raise ValueError("invalid input_length")
+                    low = max(low, length // (count + 1) + 1)
+                    if count > 1:
+                        high = min(high, (length - 1) // (count - 1))
+                    explicit = record.get("block_tokens")
+                    if explicit is not None:
+                        if type(explicit) is not int:
+                            raise ValueError("invalid block_tokens declaration")
+                        low, high = max(low, explicit), min(high, explicit)
+                    if low >= high:
+                        break
+            if low >= high:
+                break
+        if low != high:
+            raise ValueError(f"cannot establish one block size from trace (bounds {low}..{high}); obtain producer declaration")
+        base = low
+        args.base_evidence = "unique size consistent with sampled log lengths, key counts and declarations"
+    if type(base) is not int or not 0 < base < 2**31:
+        raise ValueError("missing or invalid block size in log")
+    if args.base_tokens is not None and args.base_tokens != base:
+        raise ValueError(f"--base-tokens conflicts with log: expected {base}")
     if args.format == "normalized":
         return base, "prefix", "normalized schema"
     declared = row.get("key_form")
@@ -147,7 +170,7 @@ def prepare(args, dest):
                     total += length
                     count += 1
                     previous = ts
-                    if n == CHUNK:
+                    if n == args.requests_per_file:
                         finish(stream, chunk, n, tokens, chunks)
                         stream = None
         if not count:
@@ -157,8 +180,6 @@ def prepare(args, dest):
     finally:
         if stream and not stream.closed:
             stream.close()
-    if args.chunks_per_bundle > 1:
-        bundle(dest, chunks, args.chunks_per_bundle)
     manifest = dict(format="BTCPFX01", base_tokens=args.base_tokens, instance_id=args.domain,
                     hash_mode=args.hash_mode or "prefix", hash_evidence=args.hash_evidence, requests=count, input_tokens=total, chunks=chunks)
     (dest / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
@@ -178,9 +199,11 @@ if __name__ == "__main__":
     p.add_argument("--format", choices=["bailian", "normalized"], required=True)
     p.add_argument("--hash-mode", choices=["raw", "prefix"])
     p.add_argument("--base-tokens", type=int)
-    p.add_argument("--chunks-per-bundle", type=int, default=10, help="1 keeps loose native chunks")
     p.add_argument("--domain", required=True)
+    p.add_argument("--requests-per-file", type=int, default=CHUNK)
     a = p.parse_args()
+    if a.requests_per_file < 1:
+        p.error("--requests-per-file must be positive")
     if a.format == "normalized" and a.hash_mode:
         p.error("specify --hash-mode only for Bailian input; normalized input requires prefix keys")
     print("预处理：检查来源粒度和 hash 类型…", file=sys.stderr, flush=True)
@@ -188,9 +211,9 @@ if __name__ == "__main__":
         a.base_tokens, a.hash_mode, a.hash_evidence = resolve_format(a)
     except (ValueError, StopIteration) as e:
         p.error(str(e) or "empty trace")
-    print(f"判定：{a.base_tokens} tokens/block，hash={a.hash_mode}，依据={a.hash_evidence}", file=sys.stderr)
-    if a.hash_mode not in ("raw", "prefix") or a.chunks_per_bundle < 1:
-        p.error("invalid hash mode or bundle size")
+    print(f"判定：{a.base_tokens} tokens/block（{a.base_evidence}），hash={a.hash_mode}，依据={a.hash_evidence}", file=sys.stderr)
+    if a.hash_mode not in ("raw", "prefix"):
+        p.error("invalid hash mode")
     if a.out.exists():
         p.error("output already exists")
     a.out.parent.mkdir(parents=True, exist_ok=True)
