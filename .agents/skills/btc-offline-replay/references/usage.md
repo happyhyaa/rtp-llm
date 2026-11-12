@@ -18,7 +18,7 @@ python3 "$S/prepare.py" part01.jsonl.zst part02.jsonl.zst \
 {"request_id":"r1","timestamp_ns":1000000000,"input_len":513,"block_tokens":256,"key_form":"prefix","keys":[101,202],"instance_id":"shared"}
 ```
 
-输出采用 BTCPFX01。每 100,000 条一片，以 000000.btcbin 开始；manifest.json 记录每片请求数、输入 token 总数和 SHA-256。块序列保持全局基础粒度。业务侧已做 CP 抽样的输入需要与后端另行对齐，重复抽样会改变结果。
+输出采用 BTCPFX01。原生后端按每 100,000 条和固定序号读取逻辑分片，以 000000.btcbin 开始。默认每 10 片集中存一个 tar，即每百万请求一个文件。通过 --chunks-per-bundle 调节，每包 1 片时保留独立 btcbin。回放当前会在临时目录解包再校验；用 TMPDIR 指向有足够空间的本地盘，多组并行时按每个进程的解包量预留空间。manifest.json 记录每片请求数、输入 token 总数和 SHA-256。块序列保持全局基础粒度。业务侧已做 CP 抽样的输入需要与后端另行对齐，重复抽样会改变结果。
 
 ## 2. 使用待测版本的原生后端
 
@@ -52,3 +52,30 @@ FULL 命中率 = FULL 命中 token 总数 / 全部正式输入 token 总数；�
 接入兼容 DSv4.1 测试配置的原生后端后，可运行 `python3 "$S/smoke.py" /path/to/evaluation_replay`。该用例使用合成请求，比较一次性执行与断点续跑的逐请求结果。
 
 需要定位两种策略的分歧时，加上 `--cases 10`。工具对齐本阶段逐请求 FULL / 联合长度，给出变长、变短的请求数和损失最大的原始请求序号；逐 key 淘汰原因需要对应后端的事件追踪。
+
+## 日志字段与自动判定
+
+--base-tokens 表示日志中每个完整 hash 对应的 token 数。省略时读取首条记录的 block_tokens；缺少声明时从生产端确认并传参。元数据池每块字节数和 CP 映射由后端配置决定。
+
+百炼输入省略 --hash-mode 时先读取 key_form。没有声明时，检查首个文件最多一万条请求、保存最多 65,536 个不同块的前驱：若同一 key 出现在不同前驱之后（包括起点），在同一命名空间、相同算法且无碰撞的假设下可判定为 raw。无法区分时要求提供来源声明。手工指定与记录声明冲突会报错。混合来源应分开转换；这项抽样不能认证整个数据集的生产方式。
+
+## 定位版本与构建
+
+在完整的待测 Git 检出运行下列命令。locate 展示 HEAD 和 block_tree_cache 路径下 BUILD 中显式命名的规则。宏生成或改名、移动的包可以通过 Bazel query 定位，再显式传目标。编译命令接受一个目标，实际依赖闭包由 Bazel 按相同配置解析。示例标签仅适用于含该离线适配器的检出。
+
+```sh
+python3 "$S/backend.py" locate --repo "$RTP_REPO"
+python3 "$S/backend.py" build --repo "$RTP_REPO" \
+  --target //rtp_llm/cpp/cache/block_tree_cache/benchmark:evaluation_replay \
+  --option=--config=cuda13 > build-receipt.json
+```
+
+输出包含提交、工作区状态、目标、构建选项、依赖和产物。缺少回放目标时需要接入该版本的适配器。元数据适配器应显式注入 transfer completion 和逻辑块池，保留引用、迁移、回滚及淘汰状态机。工具无法从任意源码自动推断哪些分配或 copy 可以删掉。每个新适配器须核验实际 payload 分配/搬移计数及失败路径。
+
+## 网页报告
+
+```sh
+python3 "$S/analyze.py" baseline/run-1m candidate/run-1m --cases 10 --html report.html
+```
+
+HTML 可离线打开，包含预热与正式区间、各组 FULL/联合命中率、达标率和回收计数器。--cases 会增加本阶段变长、变短和损失最大的请求。

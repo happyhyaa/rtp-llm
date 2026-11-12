@@ -6,6 +6,8 @@ import subprocess
 from pathlib import Path
 
 from prepare import CHUNK, digest
+from bundles import unpack
+from tempfile import TemporaryDirectory
 
 
 def token_prefix(path, count):
@@ -36,11 +38,16 @@ def prefix(data, chunks, count):
     return total
 
 
-def main(a):
+def main(a, scratch):
     manifest = a.data / "manifest.json"
     trace = json.loads(manifest.read_bytes())
     if trace["format"] != "BTCPFX01":
         raise ValueError("unsupported trace format")
+    if any(c["file"] != f"{i:06}.btcbin" for i, c in enumerate(trace["chunks"])):
+        raise ValueError("unexpected chunk names")
+    if any("bundle" in c for c in trace["chunks"]):
+        unpack(a.data, trace["chunks"], scratch)
+        a.data = scratch
     for i, c in enumerate(trace["chunks"]):
         if c["file"] != f"{i:06}.btcbin" or digest(a.data / c["file"]) != c["sha256"]:
             raise ValueError(f"chunk {i} failed identity check")
@@ -95,4 +102,6 @@ if __name__ == "__main__":
     p.add_argument("--measure", type=int, required=True)
     p.add_argument("--stop", type=int, help="cumulative measured count for this stage")
     p.add_argument("--resume", type=Path, help="previous verified run directory")
-    main(p.parse_args())
+    args = p.parse_args()
+    with TemporaryDirectory() as tmp:
+        main(args, Path(tmp))
