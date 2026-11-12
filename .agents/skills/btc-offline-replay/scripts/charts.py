@@ -36,11 +36,16 @@ def table(rows,columns):
     body=''.join('<tr>'+''.join('<td>'+esc(fmt(cell(row,key)))+'</td>' for _,key,fmt in columns)+'</tr>' for row in rows)
     return '<div class="table-scroll"><table><thead><tr>'+head+'</tr></thead><tbody>'+body+'</tbody></table></div>'
 
-def plot(out,name,title,rows,series,percentage=False):
+def plot(out,name,title,rows,series,percentage=False,missing=None):
     fig,ax=plt.subplots(figsize=(12,4.6))
+    scale = 1 if max(row['end_request'] for row in rows) < 100000 else 1000000
+    any_value = False
     for key,label,color,style,marker in series:
-        xs=[row['end_request']/1e6 for row in rows]
+        xs=[row['end_request']/scale for row in rows]
         ys=[cell(row,key) if cell(row,key) is not None else float('nan') for row in rows]
+        if not any(y == y for y in ys):
+            continue
+        any_value = True
         ax.plot(xs,ys,label=label,color=color,linestyle=style,marker=marker,linewidth=2,markersize=7,
                 markerfacecolor='white' if marker=='o' else color)
         for x,y in zip(xs,ys):
@@ -49,16 +54,21 @@ def plot(out,name,title,rows,series,percentage=False):
                 ax.annotate(f'{y*100:.3f}%' if percentage else number(y),(x,y),xytext=(0,offset),
                             textcoords='offset points',ha='center',color=color,fontsize=10)
     ax.set_title(title,fontsize=20,fontweight='bold',pad=26)
-    ax.set_xlabel('本轮已处理 request 数（百万）',labelpad=10)
+    ax.set_xlabel('累计正式请求数' if scale == 1 else '累计正式请求数（百万）',labelpad=10)
     ax.set_ylabel('比例' if percentage else ('平均差值（tokens/request）' if name=='match-gap' else '匹配长度（tokens）'),labelpad=10)
-    ax.set_xticks([row['end_request']/1e6 for row in rows])
+    ax.set_xticks([row['end_request']/scale for row in rows])
     ax.grid(axis='y',alpha=.18);ax.set_axisbelow(True)
     if percentage:ax.yaxis.set_major_formatter(ticker.PercentFormatter(xmax=1))
     elif name=='match-gap':ax.yaxis.set_major_formatter(ticker.FuncFormatter(lambda value,_:f'{value:g}'))
     else:ax.yaxis.set_major_formatter(ticker.EngFormatter())
     ax.spines[['top','right']].set_visible(False)
     ax.margins(x=.1,y=.22)
-    ax.legend(loc='upper center',bbox_to_anchor=(.5,-.2),ncol=3,frameon=False,fontsize=10)
+    if not any_value:
+        ax.set_xlim(0, max(row['end_request'] for row in rows)/scale * 1.05)
+        ax.set_ylim(0, 1)
+        ax.text(.5,.5,missing or '当前区间缺少可计算的数据',transform=ax.transAxes,ha='center',va='center')
+    else:
+        ax.legend(loc='upper center',bbox_to_anchor=(.5,-.2),ncol=3,frameon=False,fontsize=10)
     fig.tight_layout()
     fig.savefig(out/(name+'.svg'),bbox_inches='tight')
     fig.savefig(out/(name+'.png'),dpi=130,bbox_inches='tight')
@@ -72,21 +82,25 @@ def main():
             font_manager.fontManager.addfont(path);plt.rcParams['font.family']=font_manager.FontProperties(fname=path).get_name();break
     plt.rcParams.update({'font.size':11,'axes.unicode_minus':False})
     windows=data['windows'];total=data['total'];step=data['request_step']
+    coverage = '本次仅有一个统计窗口，图中展示实测点。' if len(windows)==1 else ''
+    if total['theory_hit_rate'] is None:
+        coverage += ' 本次未提供无限容量全保留基准，理论曲线暂无数据。'
     first_column=('本轮 request','end_request',lambda n:f'{n:,}')
     graphs=[]
-    def add(name,title,rows,series,percentage,columns,description):
-        plot(out,name,title,rows,series,percentage)
+    def add(name,title,rows,series,percentage,columns,description,missing=None):
+        plot(out,name,title,rows,series,percentage,missing)
         graphs.append(f'<section id="{name}"><h2>{esc(title)}</h2><p class="note">{esc(description)}</p>'
                       f'<img src="{name}.svg" alt="{esc(title)}" loading="lazy">'
                       '<details><summary>原始数据</summary>'+table(rows,[first_column]+columns)+'</details></section>')
     rate_series=[(kind+'_hit_rate',LABELS[kind],COLORS[kind],*STYLES[kind]) for kind in ('theory','full','joint') if kind!='theory' or total['theory_hit_rate'] is not None]
     rate_columns=[(LABELS[k],k+'_hit_rate',percent) for k in ('theory','full','joint')]
     add('interval-hit','分段命中率',windows,rate_series,True,rate_columns,
-        data.get("window_note", f"每 {number(step)} 条请求独立统计，各曲线分母为该段输入总长度。"))
+        data.get("window_note", f"每 {number(step)} 条请求独立统计，各曲线分母为该段输入总长度。")+coverage)
     add('cumulative-hit','累计命中率',data['cumulative'],rate_series,True,rate_columns,
-        '从本轮第 1 条累计到当前；累计匹配总长度 ÷ 累计输入总长度，不平均各段命中率。')
-    if total['attainment'] is not None: add('attainment','联合命中达标率',windows,[('attainment','BTC 联合 / 理论',COLORS['joint'],'-','o')],True,
-        [('联合命中达标率','attainment',percent)],'分段联合命中率 ÷ 同段无限容量理论命中率。')
+        '累计匹配总长度 ÷ 累计输入总长度。'+coverage)
+    add('attainment','联合命中达标率',windows,[('attainment','BTC 联合 / 理论',COLORS['joint'],'-','o')],True,
+        [('联合命中达标率','attainment',percent)],'分段联合命中率 ÷ 同段无限容量理论命中率。'+(' 本次未提供同区间的无限容量基准。' if total['theory_hit_rate'] is None else ''),
+        '缺少同区间的无限容量基准，达标率暂无法计算' if total['theory_hit_rate'] is None else '该区间理论命中为零，达标率无定义')
     add('joint-full-ratio','联合命中长度比例',windows,[('joint_full_ratio','sum(JOINT) / sum(FULL)',COLORS['joint'],'-','o')],True,
         [('联合 / FULL','joint_full_ratio',percent)],'按长度加权：sum(JOINT) ÷ sum(FULL)，分母为 0 时显示 N/A。')
     add('match-gap','FULL 与联合命中长度差值',windows,[('gap_tokens.mean','mean(FULL − JOINT)','#b86630','-','o')],False,
