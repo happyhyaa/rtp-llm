@@ -73,6 +73,7 @@ if __name__ == "__main__":
     p.add_argument("runs", nargs="+", type=Path, help="baseline first")
     p.add_argument("--cases", type=int, help="include the N largest per-request regressions")
     p.add_argument("--html", type=Path, help="write a standalone HTML report")
+    p.add_argument("--theory-run", type=Path, help="aligned infinite-capacity full-retention reference for charts")
     args = p.parse_args()
     rows = compare(args.runs)
     if args.cases is not None:
@@ -82,5 +83,17 @@ if __name__ == "__main__":
             row["last_stage_cases"] = cases(args.runs[0], path, args.cases)
     if args.html:
         from report import render
-        args.html.write_text(render(rows), encoding="utf-8")
+        import subprocess
+        import sys
+        from html import escape
+        from urllib.parse import quote
+        links = []
+        for i, path in enumerate(args.runs, 1):
+            dest = args.html.parent / (args.html.stem + f"-run-{i}")
+            cmd = [sys.executable, str(Path(__file__).with_name("detailed.py")), str(path), "--output", str(dest)]
+            if args.theory_run:
+                cmd += ["--theory-run", str(args.theory_run)]
+            subprocess.run(cmd, check=True)
+            links.append(f'<li><a href="{quote(dest.name)}/report/report.html">{escape(str(path))} · 命中率曲线与回退明细</a></li>')
+        args.html.write_text(render(rows).replace("</html>", "<ul>"+"".join(links)+"</ul></html>"), encoding="utf-8")
     print(json.dumps(rows, indent=2))

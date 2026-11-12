@@ -6,6 +6,7 @@ import json
 import os
 import re
 import struct
+import sys
 import subprocess
 from contextlib import contextmanager
 from decimal import Decimal
@@ -73,14 +74,20 @@ def resolve_format(args):
     mode = args.hash_mode
     with lines(args.inputs[0], sample=True) as stream:
         row = json.loads(next(stream), parse_float=Decimal)
-    if base is None:
-        base = row.get("block_tokens")
-    if type(base) is not int or base < 1:
-        raise ValueError("base granularity unknown: provide --base-tokens from trace producer")
+    producer = row.get("block_tokens")
+    source_base = 256 if args.format == "bailian" else producer
+    if type(source_base) is not int or source_base < 1:
+        raise ValueError("normalized source must declare block_tokens")
+    if any(value is not None and value != source_base for value in (base, producer)):
+        raise ValueError(f"block size conflicts with source: expected {source_base} tokens")
+    base = source_base
     if args.format == "normalized":
-        return base, "prefix"
-    if mode or row.get("key_form"):
-        return base, mode or row["key_form"]
+        return base, "prefix", "normalized schema"
+    declared = row.get("key_form")
+    if mode and declared and mode != declared:
+        raise ValueError("hash mode conflicts with source declaration")
+    if declared or mode:
+        return base, declared or mode, "record declaration" if declared else "explicit producer setting"
     predecessors = {}
     with lines(args.inputs[0], sample=True) as stream:
         for line in islice(stream, 10000):
@@ -90,7 +97,7 @@ def resolve_format(args):
             for key in keys[:row["input_length"] // base]:
                 key = key.lower()
                 if key in predecessors and predecessors[key] != previous:
-                    return base, "raw"
+                    return base, "raw", "observed identical key following different predecessors"
                 if len(predecessors) < 65536:
                     predecessors[key] = previous
                 previous = key
@@ -153,7 +160,7 @@ def prepare(args, dest):
     if args.chunks_per_bundle > 1:
         bundle(dest, chunks, args.chunks_per_bundle)
     manifest = dict(format="BTCPFX01", base_tokens=args.base_tokens, instance_id=args.domain,
-                    hash_mode=args.hash_mode or "prefix", requests=count, input_tokens=total, chunks=chunks)
+                    hash_mode=args.hash_mode or "prefix", hash_evidence=args.hash_evidence, requests=count, input_tokens=total, chunks=chunks)
     (dest / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
 
 
@@ -176,7 +183,12 @@ if __name__ == "__main__":
     a = p.parse_args()
     if a.format == "normalized" and a.hash_mode:
         p.error("specify --hash-mode only for Bailian input; normalized input requires prefix keys")
-    a.base_tokens, a.hash_mode = resolve_format(a)
+    print("预处理：检查来源粒度和 hash 类型…", file=sys.stderr, flush=True)
+    try:
+        a.base_tokens, a.hash_mode, a.hash_evidence = resolve_format(a)
+    except (ValueError, StopIteration) as e:
+        p.error(str(e) or "empty trace")
+    print(f"判定：{a.base_tokens} tokens/block，hash={a.hash_mode}，依据={a.hash_evidence}", file=sys.stderr)
     if a.hash_mode not in ("raw", "prefix") or a.chunks_per_bundle < 1:
         p.error("invalid hash mode or bundle size")
     if a.out.exists():
@@ -187,3 +199,5 @@ if __name__ == "__main__":
         staged.mkdir()
         prepare(a, staged)
         os.rename(staged, a.out)
+    receipt = json.loads((a.out / "manifest.json").read_text())
+    print(f"完成：{receipt['requests']} 条请求；{a.base_tokens} tokens/block；输入 hash={a.hash_mode}；输出 hash=prefix；清单 {a.out / 'manifest.json'}")
