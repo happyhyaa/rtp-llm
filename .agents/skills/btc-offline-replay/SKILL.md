@@ -15,7 +15,7 @@ JSONL 每行是一条请求。下面是一条合成的 prefill 请求，假设�
 
 - `request_id` 是请求标识字符串。`timestamp` 是请求到达的 Unix 秒数，支持小数；样本对应 `1793000000125000000` 纳秒。
 - `input_length` 是输入 token 总数。513 个 token 包含两个完整块和 1 个尾部 token，因此这条记录提供两个完整块的 hash。尾部 token 计入命中率分母。
-- `input_block_hash_ids` 按输入顺序排列，每个元素是 16 位十六进制字符串。本例转换参数为 `--format bailian --base-tokens 256 --hash-mode raw`。若数据源已记录前缀 hash，选择 `--hash-mode prefix`。两种 hash 的文本格式相同，需从数据源确认语义。
+- `input_block_hash_ids` 按输入顺序排列，每个元素是 16 位十六进制字符串。转换器优先读取日志声明，或从相同块 key 的不同前驱识别原始 hash。没有充分证据时需指定模式。本例转换参数为 `--format bailian --base-tokens 256 --hash-mode raw`。若数据源已记录前缀 hash，选择 `--hash-mode prefix`。两种 hash 的文本格式相同，需从数据源确认语义。
 
 ## 回放与比较
 
@@ -23,6 +23,8 @@ JSONL 每行是一条请求。下面是一条合成的 prefill 请求，假设�
 
 用 scripts/replay.py 设置预热和正式请求数。分阶段测试时保持最终 --measure 固定，通过 --stop 设置本次累计终点。续跑读取上一阶段验证通过的检查点。
 
-用 scripts/analyze.py 对照多组结果，第一个目录作为达标率基准。报告统计区间、输入 token 总数、FULL 与联合命中率，并标明配置与后端版本。逐请求文件仅包含本次执行新增的记录。
+用 scripts/backend.py locate 检查指定检出的 BTC 规则；选定已接入元数据回放的可执行目标后，build 子命令用 Bazel cquery 记录依赖并定向编译。
+
+用 scripts/analyze.py --html report.html 对照多组结果，第一个目录作为达标率基准。报告统计区间、输入 token 总数、FULL 与联合命中率，并标明配置与后端版本。逐请求文件仅包含本次执行新增的记录。
 
 [使用说明、命令及输入输出契约](references/usage.md)

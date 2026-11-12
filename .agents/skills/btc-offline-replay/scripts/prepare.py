@@ -12,6 +12,8 @@ from decimal import Decimal
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+from bundles import bundle
+
 CHUNK = 100000
 MASK = (1 << 64) - 1
 
@@ -25,14 +27,15 @@ def digest(path):
 
 
 @contextmanager
-def lines(path):
+def lines(path, sample=False):
     if path.suffix == ".zst":
         with subprocess.Popen(["zstd", "-dc", "--", str(path)], stdout=subprocess.PIPE) as proc:
             try:
                 yield proc.stdout
             finally:
                 proc.stdout.close()
-            if proc.wait():
+            status = proc.wait()
+            if status and not (sample and status in (-13, 141)):
                 raise ValueError(f"zstd failed for {path}")
     else:
         opener = gzip.open if path.suffix == ".gz" else open
@@ -63,6 +66,37 @@ def bailian(row, base, mode):
     return int(ts), length, keys
 
 
+def resolve_format(args):
+    """A repeated key with distinct predecessor identities contradicts prefix hashing."""
+    from itertools import islice
+    base = args.base_tokens
+    mode = args.hash_mode
+    with lines(args.inputs[0], sample=True) as stream:
+        row = json.loads(next(stream), parse_float=Decimal)
+    if base is None:
+        base = row.get("block_tokens")
+    if type(base) is not int or base < 1:
+        raise ValueError("base granularity unknown: provide --base-tokens from trace producer")
+    if args.format == "normalized":
+        return base, "prefix"
+    if mode or row.get("key_form"):
+        return base, mode or row["key_form"]
+    predecessors = {}
+    with lines(args.inputs[0], sample=True) as stream:
+        for line in islice(stream, 10000):
+            row = json.loads(line)
+            previous = None
+            keys = row["input_block_hash_ids"]
+            for key in keys[:row["input_length"] // base]:
+                key = key.lower()
+                if key in predecessors and predecessors[key] != previous:
+                    return base, "raw"
+                if len(predecessors) < 65536:
+                    predecessors[key] = previous
+                previous = key
+    raise ValueError("hash mode ambiguous: provide producer key_form or --hash-mode raw/prefix")
+
+
 def prepare(args, dest):
     domain = args.domain.encode()
     if not 0 < len(domain) <= 1048576 or not 0 < args.base_tokens < 2**31:
@@ -77,6 +111,8 @@ def prepare(args, dest):
                     try:
                         row = json.loads(line, parse_float=Decimal)
                         if args.format == "bailian":
+                            if row.get("key_form", args.hash_mode) != args.hash_mode or row.get("block_tokens", args.base_tokens) != args.base_tokens:
+                                raise ValueError("conflicting hash mode or block granularity")
                             ts, length, keys = bailian(row, args.base_tokens, args.hash_mode)
                         else:
                             if (row["key_form"], row["instance_id"], row["block_tokens"]) != (
@@ -114,6 +150,8 @@ def prepare(args, dest):
     finally:
         if stream and not stream.closed:
             stream.close()
+    if args.chunks_per_bundle > 1:
+        bundle(dest, chunks, args.chunks_per_bundle)
     manifest = dict(format="BTCPFX01", base_tokens=args.base_tokens, instance_id=args.domain,
                     hash_mode=args.hash_mode or "prefix", requests=count, input_tokens=total, chunks=chunks)
     (dest / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
@@ -132,11 +170,15 @@ if __name__ == "__main__":
     p.add_argument("--out", type=Path, required=True)
     p.add_argument("--format", choices=["bailian", "normalized"], required=True)
     p.add_argument("--hash-mode", choices=["raw", "prefix"])
-    p.add_argument("--base-tokens", type=int, required=True)
+    p.add_argument("--base-tokens", type=int)
+    p.add_argument("--chunks-per-bundle", type=int, default=10, help="1 keeps loose native chunks")
     p.add_argument("--domain", required=True)
     a = p.parse_args()
-    if (a.format == "bailian") != bool(a.hash_mode):
+    if a.format == "normalized" and a.hash_mode:
         p.error("specify --hash-mode only for Bailian input; normalized input requires prefix keys")
+    a.base_tokens, a.hash_mode = resolve_format(a)
+    if a.hash_mode not in ("raw", "prefix") or a.chunks_per_bundle < 1:
+        p.error("invalid hash mode or bundle size")
     if a.out.exists():
         p.error("output already exists")
     a.out.parent.mkdir(parents=True, exist_ok=True)

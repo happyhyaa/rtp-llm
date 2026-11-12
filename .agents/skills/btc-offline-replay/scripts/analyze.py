@@ -25,7 +25,7 @@ def compare(paths):
         ):
             raise ValueError(f"different trace or measurement range: {path}")
         full, joint = t["full_tokens"]["sum"], t["joint_tokens"]["sum"]
-        rows.append(dict(run=str(path), revision=ident["revision"], requests=t["requests"],
+        rows.append(dict(run=str(path), revision=ident["revision"], requests=t["requests"], warmup=ident["warmup"],
                          input_tokens=t["input_tokens"], full_rate=full/t["input_tokens"],
                          joint_rate=joint/t["input_tokens"], lost_to_joint_tokens=full-joint,
                          attainment=joint/baseline if baseline else None,
@@ -72,6 +72,7 @@ if __name__ == "__main__":
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("runs", nargs="+", type=Path, help="baseline first")
     p.add_argument("--cases", type=int, help="include the N largest per-request regressions")
+    p.add_argument("--html", type=Path, help="write a standalone HTML report")
     args = p.parse_args()
     rows = compare(args.runs)
     if args.cases is not None:
@@ -79,4 +80,7 @@ if __name__ == "__main__":
             p.error("--cases requires N >= 1 and at least two runs")
         for path, row in zip(args.runs[1:], rows[1:]):
             row["last_stage_cases"] = cases(args.runs[0], path, args.cases)
+    if args.html:
+        from report import render
+        args.html.write_text(render(rows), encoding="utf-8")
     print(json.dumps(rows, indent=2))
