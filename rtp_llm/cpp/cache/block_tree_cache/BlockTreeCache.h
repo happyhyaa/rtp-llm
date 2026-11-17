@@ -1,4 +1,5 @@
 #pragma once
+#include "rtp_llm/cpp/cache/block_tree_cache/MatchHistory.h"
 
 #include <cstdint>
 #include <memory>
@@ -37,6 +38,7 @@ struct BlockTreeKeySnapshot {
 };
 // Unified configuration for BlockTreeCache behavior and pool sizing.
 struct BlockTreeCacheConfig {
+    bool enable_match_history{false};
     // ---- Tier enable flags ----
     bool enable_device_cache{true};
     bool enable_host_cache{false};
@@ -161,14 +163,17 @@ public:
                   const std::vector<std::vector<GroupSetResource>>& resources,
                   Tier                                              target_tier,
                   bool                                              is_resident,
-                  std::optional<int64_t>                            request_id = {},
+                  std::optional<int64_t>                            request_id         = {},
                   size_t                                            remote_reuse_begin = 0,
-                  size_t                                            remote_reuse_end = 0);
+                  size_t                                            remote_reuse_end   = 0);
     // Directly reclaim up to num_blocks device blocks belonging to one group set
     // (target_tier = NONE, content dropped). Returns the number actually freed.
     // Skips plans containing device blocks that would remain referenced after dropping.
     int evictForGroup(std::string_view group_tag, size_t num_blocks);
 
+    void                                      setMatchObservationTimestamp(uint64_t timestamp_ns, bool enabled = true);
+    MatchLengths                              latestMatchLengths() const;
+    MatchHistory                              matchHistory() const;
     CacheStats                                getStats() const;
     std::vector<CachePoolMetrics>             poolMetrics() const;
     void                                      reportMetrics() const;
@@ -224,6 +229,8 @@ private:
     void checkWatermark();
     // Caller holds mutex_.
     void onWorkflowSettledLocked(bool check_watermark);
+
+    friend class BlockTreeMetadataCheckpoint;
 
     BlockTreeCacheConfig                           config_;
     std::unique_ptr<BlockTree>                     tree_;

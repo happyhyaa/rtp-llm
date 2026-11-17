@@ -55,6 +55,7 @@ struct BackingLayout {
     bool   crc_enabled{false};
 };
 
+std::shared_ptr<const CacheTopology> blockTreeKeyTopology(const CacheConfig& config, size_t cp_size);
 bool          buildBlockTreeGroupMembers(const CacheConfig& config, std::vector<std::vector<std::string>>& members);
 BackingLayout computeBlockTreeBackingLayout(const CacheConfig&              config,
                                             const std::vector<std::string>& members,

@@ -659,19 +659,8 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
 
     // Canonical CP keys cover a virtual token block. Keep the physical layout
     // unchanged and publish the key stride only to cache matching/remote storage.
-    auto cache_topology = cache_config.topologyPtr();
-    if (const auto mapper = coordinator_manager->cpSlotMapper(); mapper && mapper->isSharded()) {
-        auto         groups  = cache_topology->groups();
-        const size_t cp_size = static_cast<size_t>(mapper->cpSize());
-        RTP_LLM_CHECK_WITH_INFO(cache_config.seq_size_per_block <= std::numeric_limits<size_t>::max() / cp_size,
-                                "canonical CP cache key stride overflow");
-        for (auto& group : groups) {
-            auto spec                    = group.spec->clone();
-            spec->cache_key_token_stride = cache_config.seq_size_per_block * cp_size;
-            group.spec                   = std::move(spec);
-        }
-        cache_topology = CacheTopology::create(std::move(groups), cache_topology->layers());
-    }
+    const auto mapper   = coordinator_manager->cpSlotMapper();
+    auto cache_topology = blockTreeKeyTopology(cache_config, mapper && mapper->isSharded() ? mapper->cpSize() : 1);
     group_sets.reserve(group_members.size());
     for (size_t group_set_id = 0; group_set_id < group_members.size(); ++group_set_id) {
         const std::vector<std::string>& members = group_members[group_set_id];

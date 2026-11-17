@@ -37,6 +37,22 @@ size_t positive(int64_t value, const char* name) {
 
 }  // namespace
 
+std::shared_ptr<const CacheTopology> blockTreeKeyTopology(const CacheConfig& cache_config, size_t cp_size) {
+    auto cache_topology = cache_config.topologyPtr();
+    if (cp_size > 1) {
+        auto groups = cache_topology->groups();
+        RTP_LLM_CHECK_WITH_INFO(cache_config.seq_size_per_block <= std::numeric_limits<size_t>::max() / cp_size,
+                                "canonical CP cache key stride overflow");
+        for (auto& group : groups) {
+            auto spec                    = group.spec->clone();
+            spec->cache_key_token_stride = cache_config.seq_size_per_block * cp_size;
+            group.spec                   = std::move(spec);
+        }
+        cache_topology = CacheTopology::create(std::move(groups), cache_topology->layers());
+    }
+    return cache_topology;
+}
+
 bool buildBlockTreeGroupMembers(const CacheConfig& config, std::vector<std::vector<std::string>>& members) {
     members.clear();
     for (const auto& group : config.topology().groups()) {

@@ -14,7 +14,9 @@ bool EvictionHeap::EntryLess::operator()(const EvictionEntry& a, const EvictionE
         return a.secondary_key < b.secondary_key;
     if (a.cache_key != b.cache_key)
         return a.cache_key < b.cache_key;
-    return std::less<TreeNode*>{}(a.node, b.node);  // process-local deterministic tie-breaker
+    if (a.node->stable_id && b.node->stable_id)
+        return a.node->stable_id < b.node->stable_id;
+    return std::less<TreeNode*>{}(a.node, b.node);
 }
 
 EvictionHeap::EvictionHeap(EvictionPolicy policy): policy_(policy) {}

@@ -145,6 +145,7 @@ cc_library(
     }),
     hdrs = [
         "BlockTree.h",
+        "MatchHistory.h",
         "metrics/BlockTreeCacheMetricsReporter.h",
         "metrics/CacheLockGuard.h",
         "metrics/CacheStageMetrics.h",

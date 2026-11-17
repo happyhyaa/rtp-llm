@@ -11,6 +11,9 @@
 namespace rtp_llm {
 
 struct TreeNode {
+    uint64_t                                    stable_id{0};
+    uint64_t                                    branch_hits{0};
+    uint64_t                                    depth_blocks{0};
     CacheKeyType                                cache_key{0};
     size_t                                      index{std::numeric_limits<size_t>::max()};
     std::vector<int>                            token_ids;

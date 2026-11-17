@@ -1,0 +1,9 @@
+{
+  "target": "//rtp_llm/cpp/cache/block_tree_cache/benchmark:evaluation_replay",
+  "checks": [
+    "//rtp_llm/cpp/cache/block_tree_cache/benchmark:metadata_pool_test",
+    "//rtp_llm/cpp/cache/block_tree_cache/benchmark:evaluation_replay_test"
+  ],
+  "source_baseline": "a3fdca664089a44769b1d8c220ea0141fd55731f",
+  "patch": "metadata-replay.patch"
+}

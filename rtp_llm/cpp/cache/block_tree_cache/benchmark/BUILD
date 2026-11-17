@@ -325,3 +325,65 @@ cc_test(
         "@com_google_googletest//:gtest_main",
     ],
 )
+
+cc_binary(
+    name = "metadata_pool_test",
+    visibility = ["//tools/btc_offline:__pkg__"],
+    srcs = ["metadata/MetadataPoolTest.cc"],
+    copts = copts(),
+    tags = ["manual"],
+    deps = [
+        "//rtp_llm/cpp/cache/block_tree_cache",
+        "//rtp_llm/cpp/cache/block_tree_cache:device_block_pool",
+        "//rtp_llm/cpp/config:static_config",
+    ],
+)
+
+cc_library(
+    name = "metadata_replay_lib",
+    srcs = ["metadata/MetadataReplay.cc", "metadata/MetadataCheckpoint.cc"],
+    hdrs = ["metadata/MetadataReplay.h", "metadata/Dsv41Profile.h", "metadata/MetadataCheckpoint.h", "metadata/StateIO.h", "metadata/EvaluationStats.h"],
+    copts = copts(),
+    deps = [
+        ":benchmark_fixture",
+        ":metadata_no_payload_ops",
+        "//rtp_llm/cpp/cache/block_tree_cache:block_tree_cache_layout",
+        "//rtp_llm/cpp/cache:kv_cache_specs",
+        "//rtp_llm/cpp/cache:coordinator_cache_manager",
+        "//rtp_llm/cpp/cache:cache_config",
+        "//rtp_llm/cpp/cache:cp_slot_mapper",
+        "//rtp_llm/cpp/engine_base/stream:complete_token_ids",
+        "//rtp_llm/cpp/cache/block_tree_cache",
+    ],
+)
+cc_binary(
+    name = "metadata_replay_test",
+    visibility = ["//tools/btc_offline:__pkg__"],
+    srcs = ["metadata/MetadataReplayTest.cc"],
+    copts = copts(),
+    deps = [":metadata_replay_lib"],
+)
+
+
+cc_library(
+    name = "metadata_no_payload_ops",
+    srcs = ["metadata/NoPayloadOps.cc"],
+    copts = copts(),
+    alwayslink = True,
+)
+
+cc_binary(
+    name = "evaluation_replay",
+    visibility = ["//tools/btc_offline:__pkg__"],
+    srcs = ["metadata/EvaluationReplayMain.cc"],
+    copts = copts(),
+    deps = [":metadata_replay_lib", "@rapidjson"],
+)
+
+cc_binary(
+    name = "evaluation_replay_test",
+    visibility = ["//tools/btc_offline:__pkg__"],
+    srcs = ["metadata/EvaluationReplayTest.cc"],
+    copts = copts(),
+    deps = [":metadata_replay_lib"],
+)

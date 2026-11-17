@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cassert>
+#include <chrono>
 #include <stdexcept>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
@@ -94,7 +95,9 @@ void BlockTree::releaseNode(TreeNode* node) {
 TreeNode* BlockTree::createNode(CacheKeyType key, TreeNode* parent) {
     auto node       = std::make_unique<TreeNode>();
     node->cache_key = key;
+    node->stable_id    = next_node_id_++;
     node->parent    = parent;
+    node->depth_blocks = parent->depth_blocks + 1;
     node->index     = node_pool_.size();
     node->group_set_resources.resize(group_sets_.size());
     auto* raw = node.get();
@@ -314,6 +317,21 @@ BlockTreeInsertResult BlockTree::insertNodeImpl(const CacheKeysType&            
         } else {
             TreeNode* child              = createNode(key, current);
             current->children[key]       = child;
+            if (observe_branches_ && result.inserted_nodes.empty()) {
+                if (current == root_.get()) {
+                    match_history_.root_context_keys.insert(key);
+                } else {
+                    if (++current->branch_hits == 1)
+                        ++match_history_.historical_branch_instances;
+                    const uint64_t timestamp = observation_timestamp_ns_ ?
+                                                   observation_timestamp_ns_ :
+                                                   std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                                       std::chrono::system_clock::now().time_since_epoch())
+                                                       .count();
+                    match_history_.record(
+                        current->cache_key, current->parent->cache_key, current->depth_blocks, timestamp);
+                }
+            }
             current                      = child;
             current->group_set_resources = resources[i];
             for (size_t group_set_id = 0; group_set_id < group_sets_.size(); ++group_set_id) {
@@ -364,6 +382,12 @@ void BlockTree::removeNode(TreeNode* node) {
     if (node->parent == nullptr) {
         pending_node_pool_.erase(node->cache_key);
         return;
+    }
+    if (observe_branches_)
+        ++match_history_.evicted_nodes;
+    if (node->branch_hits) {
+        auto& position = match_history_.endpoints.at({node->cache_key, node->parent->cache_key, node->depth_blocks});
+        position.evictions.push_back({node->stable_id, node->branch_hits});
     }
     removePublishedKey(node->cache_key);
     node->parent->children.erase(node->cache_key);

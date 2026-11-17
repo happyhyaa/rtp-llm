@@ -44,11 +44,15 @@ struct BlockPoolConfigBase {
     // Sample once per process in [lower, upper); equal bounds fix the threshold, and lower=0 disables it.
     double        frozen_block_abort_lower_ratio{0.3};
     double        frozen_block_abort_upper_ratio{0.4};
+    // Offline metadata replay: retain capacity/refcounts without KV payload backing.
+    bool metadata_only{false};
 };
 
 // IBlockPool owns allocation and Tree-internal lifetime shared by Device, Host, and Disk.
 // DeviceBlockPool adds request-like outer ownership through the protected Tree edge hooks.
 class IBlockPool {
+    friend class BlockTreeMetadataCheckpoint;
+
 public:
     struct TreeReferenceStats {
         size_t                                     total_blocks;
@@ -66,6 +70,9 @@ public:
 
     void setCapacityChangeCallback(std::function<void()> callback);
 
+    bool metadataOnly() const {
+        return config_->metadata_only;
+    }
     const std::string&  poolName() const;
     virtual std::string debugString() const;
     virtual size_t      blockSizeBytes() const = 0;

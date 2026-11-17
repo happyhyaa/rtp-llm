@@ -42,6 +42,8 @@ enum class DeviceBlockRefType : uint8_t {
 };
 
 class DeviceBlockPool: public IBlockPool {
+    friend class BlockTreeMetadataCheckpoint;
+
 public:
     explicit DeviceBlockPool(std::shared_ptr<const DeviceBlockPoolConfig> config);
     ~DeviceBlockPool() override;
@@ -111,6 +113,7 @@ public:
     convertIndexToBuffer(int layer_id, BlockIdxType block, int partition_count, int partition_id) const;
 
     void* getBaseAddress() const {
+        RTP_LLM_CHECK_WITH_INFO(!config().metadata_only, "metadata-only pool has no KV address");
         return cache_base_ptr_;
     }
     bool usesDedicatedDeviceAllocation() const {
@@ -175,7 +178,7 @@ private:
 
 private:
     static constexpr size_t                          kRefTypeCount = static_cast<size_t>(DeviceBlockRefType::COUNT);
-    std::vector<uint32_t> refcounts_;
+    std::vector<uint32_t>                            refcounts_;
     std::array<std::vector<uint32_t>, kRefTypeCount> refcounts_by_type_;
     std::array<size_t, kRefTypeCount>                referenced_block_counts_{};
 

@@ -14,6 +14,7 @@
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
 #include "rtp_llm/cpp/cache/events/KVCacheEventPublisher.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/TreeNode.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/MatchHistory.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/GroupSet.h"
 
 namespace rtp_llm {
@@ -60,6 +61,12 @@ struct BlockTreeNodeRangeResult {
 };
 
 class BlockTree {
+    friend class BlockTreeMetadataCheckpoint;
+    friend class BlockTreeCache;
+    MatchHistory match_history_;
+    bool         observe_branches_{false};
+    uint64_t     observation_timestamp_ns_{0};
+
 public:
     explicit BlockTree(std::vector<GroupSetPtr> group_sets);
     ~BlockTree();
@@ -134,6 +141,7 @@ private:
     // Indexed together with node_pool_ for contiguous snapshot copies.
     CacheKeysType cache_keys_;
     int64_t       key_version_{-1};
+    uint64_t      next_node_id_{1};
 };
 
 }  // namespace rtp_llm

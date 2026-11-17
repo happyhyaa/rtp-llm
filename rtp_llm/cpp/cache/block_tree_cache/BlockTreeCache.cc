@@ -59,6 +59,7 @@ BlockTreeCache::BlockTreeCache(std::unique_ptr<BlockTree>                     tr
         onWorkflowSettledLocked(check_watermark);
     }) {
     metrics_reporter_->initEvictionMetricGroupTypes(tree_->groupSets());
+    tree_->observe_branches_ = config_.enable_match_history;
     if (storage_backend_)
         storage_backend_->setStageMetricsReporter(metrics_reporter_);
 }
@@ -166,7 +167,40 @@ BlockTreeMatchResult BlockTreeCache::match(const CacheKeysType&               ca
     BlockTreeMatchResult result;
     {
         CacheLockGuard lock(mutex_, *metrics_reporter_, "match");
+        MatchLengths sample;
+        if (tree_->observe_branches_) {
+            sample.key_count      = cache_keys.size();
+            sample.timestamp_ns   = tree_->observation_timestamp_ns_ ?
+                                        tree_->observation_timestamp_ns_ :
+                                        std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                          std::chrono::system_clock::now().time_since_epoch())
+                                          .count();
+            const auto path       = tree_->findNode(cache_keys);
+            size_t     full_limit = path.size();
+            for (const auto& group : tree_->groupSets()) {
+                if (group->groupType() != CacheGroupType::FULL)
+                    continue;
+                auto   validator = group->createMatchValidator();
+                size_t i         = 0;
+                while (i < full_limit && validator->validate(path[i]->group_set_resources[group->groupSetId()]))
+                    ++i;
+                full_limit = i;
+            }
+            while (full_limit && valid_prefix && !valid_prefix(full_limit))
+                --full_limit;
+            sample.full_blocks = full_limit;
+            if (full_limit) {
+                auto* endpoint      = path[full_limit - 1];
+                sample.endpoint_key = endpoint->cache_key;
+                sample.parent_key   = endpoint->parent->cache_key;
+            }
+        }
         result = loader_.matchLocked(cache_keys, valid_prefix, enable_storage_backend, request_id);
+        if (tree_->observe_branches_) {
+            sample.joint_blocks =
+                result.async_context ? result.async_context->localMatchedBlocks() : result.matched_device_blocks;
+            tree_->match_history_.latest = sample;
+        }
     }
     metrics_reporter_->reportCacheReuseTimeMetrics(result.reuse_time_metrics);
     return result;
@@ -205,6 +239,7 @@ size_t BlockTreeCache::insert(const CacheKeysType&                              
 }
 
 int BlockTreeCache::evictForGroup(std::string_view group_tag, size_t num_blocks) {
+    auto timing = metrics_reporter_->measureEvictionPass(true);
     CacheLockGuard lock(mutex_, *metrics_reporter_, "force_drop");
     if (!config_.isTierEnabled(Tier::DEVICE)) {
         return 0;
@@ -295,6 +330,7 @@ void BlockTreeCache::onWorkflowSettledLocked(bool check_watermark) {
 }
 
 void BlockTreeCache::checkWatermark() {
+    auto timing = metrics_reporter_->measureEvictionPass(false);
     for (Tier tier : {Tier::DISK, Tier::HOST, Tier::DEVICE}) {
         const auto watermark = config_.watermarkForTier(tier);
         if (!config_.isTierEnabled(tier)) {
@@ -304,4 +340,21 @@ void BlockTreeCache::checkWatermark() {
     }
 }
 
+}  // namespace rtp_llm
+
+namespace rtp_llm {
+void BlockTreeCache::setMatchObservationTimestamp(uint64_t timestamp_ns, bool enabled) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    tree_->observe_branches_         = config_.enable_match_history && enabled;
+    tree_->observation_timestamp_ns_ = timestamp_ns;
+    tree_->match_history_.latest     = {};
+}
+MatchLengths BlockTreeCache::latestMatchLengths() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return tree_->match_history_.latest;
+}
+MatchHistory BlockTreeCache::matchHistory() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return tree_->match_history_;
+}
 }  // namespace rtp_llm
