@@ -2,6 +2,8 @@
 import argparse
 import json
 import struct
+import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -39,6 +41,7 @@ def prefix(data, chunks, count):
 
 
 def main(a, scratch):
+    data_source = a.data.resolve().name
     manifest = a.data / "manifest.json"
     trace = json.loads(manifest.read_bytes())
     if trace["format"] != "BTCPFX01":
@@ -106,6 +109,23 @@ def main(a, scratch):
         raise ValueError("invalid aggregate match lengths")
     if (native / "match-lengths.u64").stat().st_size != 16 * (end - previous):
         raise ValueError("unexpected number of per-request match pairs")
+    metadata = dict(source=data_source, instance=trace["instance_id"], base_tokens=trace["base_tokens"])
+    metadata.update(trace.get("report_environment", {}))
+    (a.out / "report-environment.json").write_text(json.dumps(metadata, ensure_ascii=False))
+    arrival = native / "arrival-hits.u64"
+    if arrival.exists():
+        if arrival.stat().st_size != 48 * (end - previous):
+            raise ValueError("unexpected number of arrival-time records")
+        stages = a.out / "report-stages"
+        stages.mkdir()
+        sources = sorted((a.resume / "report-stages").glob("*.u64")) if a.resume else []
+        if sum(f.stat().st_size for f in sources) == 48 * previous:
+            for src in sources + [arrival]:
+                dst = stages / (f"{previous:016d}.u64" if src == arrival else src.name)
+                try:
+                    os.link(src, dst)
+                except OSError:
+                    shutil.copyfile(src, dst)
     (a.out / "SUCCESS").touch()
 
 

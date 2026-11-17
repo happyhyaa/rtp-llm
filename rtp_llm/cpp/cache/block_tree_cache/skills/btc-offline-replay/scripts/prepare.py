@@ -182,6 +182,10 @@ def prepare(args, dest):
             stream.close()
     manifest = dict(format="BTCPFX01", base_tokens=args.base_tokens, instance_id=args.domain,
                     hash_mode=args.hash_mode or "prefix", hash_evidence=args.hash_evidence, requests=count, input_tokens=total, chunks=chunks)
+    manifest["report_environment"] = {"source": ", ".join(path.name for path in args.inputs)}
+    for key in ("cluster", "prefill_ip", "capture_time"):
+        if getattr(args, key, None):
+            manifest["report_environment"][key] = getattr(args, key)
     (dest / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
 
 
@@ -200,6 +204,9 @@ if __name__ == "__main__":
     p.add_argument("--hash-mode", choices=["raw", "prefix"])
     p.add_argument("--base-tokens", type=int)
     p.add_argument("--domain", required=True)
+    p.add_argument("--cluster", help="source cluster configuration for the report")
+    p.add_argument("--prefill-ip", help="prefill node recorded by the data collector")
+    p.add_argument("--capture-time", help="documented capture interval, including timezone")
     p.add_argument("--requests-per-file", type=int, default=CHUNK)
     a = p.parse_args()
     if a.requests_per_file < 1:

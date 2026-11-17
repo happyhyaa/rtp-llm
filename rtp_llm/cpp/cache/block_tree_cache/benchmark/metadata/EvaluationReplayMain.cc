@@ -132,6 +132,7 @@ int main(int argc, char** argv) {
         const auto                    initial_measured = stats.total.requests;
         std::map<std::string, double> stage_totals;
         std::ofstream                 facts(out / "match-lengths.u64", std::ios::binary);
+        std::ofstream arrival_facts(out / "arrival-hits.u64", std::ios::binary);
         uint64_t                      index = 0, skip = ordinal;
         while (ordinal < stop) {
             std::ostringstream name;
@@ -188,6 +189,11 @@ int main(int argc, char** argv) {
                 stateRequire(result.joint_match_tokens == uint64_t(result.reuse_tokens),
                              "native joint match and ready reuse differ");
                 const uint64_t lengths[] = {result.full_match_tokens, result.joint_match_tokens};
+                stateRequire(result.host_hit_tokens + result.disk_hit_tokens <= lengths[1], "tier hits exceed joint");
+                const uint64_t arrival[] = {q.timestamp_ns, static_cast<uint64_t>(q.input_tokens), lengths[0],
+                                            lengths[1], result.host_hit_tokens, result.disk_hit_tokens};
+                arrival_facts.write(reinterpret_cast<const char*>(arrival), sizeof(arrival));
+                stateRequire(bool(arrival_facts), "arrival facts write failed");
                 facts.write(reinterpret_cast<const char*>(lengths), sizeof(lengths));
                 stateRequire(bool(facts), "facts write failed");
                 for (const auto& [stage, us] : result.stage_us)
@@ -203,6 +209,8 @@ int main(int argc, char** argv) {
             skip = 0;
             ++index;
         }
+        arrival_facts.close();
+        stateRequire(bool(arrival_facts), "arrival facts flush failed");
         std::ostringstream stages;
         stages << "{\"unit\":\"us\",\"measured_requests_this_invocation\":"
                << (ordinal - std::min(ordinal, warmup) - initial_measured) << ",\"total_us\":{";

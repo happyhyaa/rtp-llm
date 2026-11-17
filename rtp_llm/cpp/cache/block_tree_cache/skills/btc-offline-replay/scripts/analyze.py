@@ -81,7 +81,10 @@ if __name__ == "__main__":
             p.error("--cases requires N >= 1 and at least two runs")
         for path, row in zip(args.runs[1:], rows[1:]):
             row["last_stage_cases"] = cases(args.runs[0], path, args.cases)
-    if args.html:
+    if args.html and len(args.runs) == 1 and args.theory_run is None:
+        from single_report import render_run
+        render_run(args.runs[0], args.html)
+    elif args.html:
         from report import render, with_charts
         import subprocess
         import sys

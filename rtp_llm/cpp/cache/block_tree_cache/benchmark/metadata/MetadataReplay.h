@@ -25,6 +25,8 @@ struct MetadataRequest {
 struct MetadataRequestResult {
     bool                            success{false};
     int                             reuse_tokens{0};
+    uint64_t                        host_hit_tokens{0};
+    uint64_t                        disk_hit_tokens{0};
     uint64_t                        full_match_tokens{0}, joint_match_tokens{0};
     std::map<std::string, uint64_t> evictions;
     std::string                     status;

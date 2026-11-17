@@ -494,8 +494,12 @@ struct MetadataReplay::Impl {
                 if (out.success) {
                     auto load = std::dynamic_pointer_cast<LoadAsyncContext>(allocated.async_context);
                     require(load != nullptr, "unexpected load context");
-                    out.reuse_tokens =
-                        static_cast<int>(load->matchedBlocks()) * coordinator->cpSlotMapper()->reuseBlockTokens(config);
+                    const auto unit  = coordinator->cpSlotMapper()->reuseBlockTokens(config);
+                    out.reuse_tokens = static_cast<int>(load->matchedBlocks()) * unit;
+                    if (r.observe) {
+                        out.host_hit_tokens = load->matchedBlocks(Tier::HOST) * unit;
+                        out.disk_hit_tokens = load->matchedBlocks(Tier::DISK) * unit;
+                    }
                 } else
                     out.status = "load_failed";
             }

@@ -74,6 +74,12 @@ python3 "$S/backend.py" build --repo "$RTP_REPO" \
 
 ## 网页报告
 
+默认命令为 `python3 "$S/analyze.py" RUN --html report.html`。单版本模板仅依赖 Python 标准库，HTML 可独立打开。每段和累计值均先求 token 总和再相除，预热不进入分母。空段显示缺数，相同到达时间的请求归入同一段。旧版回放缺少逐请求到达和分层事实时保留图位，展示已知总量。
+
+prepare.py 接受可选参数 --cluster、--prefill-ip、--capture-time，日志文件名自动记录。回放生成 RUN/report-environment.json。可按采集记录补充字符串字段 `source`（日志来源）、`cluster`（集群配置）、`prefill_ip`、`capture_time`（采集时间范围）。缓存实例标识与 prefill IP 分别展示。每段正式请求的 arrival-hits.u64 按序保存六个 uint64（纳秒到达时间、输入、FULL、联合、Host、Disk tokens）；Device 由联合减 Host 和 Disk 得到。report-stages 收齐各次续跑的正式请求记录。
+
+显式跨版本比较示例：
+
 ```sh
 python3 "$S/analyze.py" baseline/run-1m candidate/run-1m --cases 10 --html report.html
 ```
@@ -90,7 +96,7 @@ python3 "$S/backend.py" auto --repo "$RTP_REPO" --work /tmp/btc-build-new --opti
 
 ## 带图的报告
 
-安装 Matplotlib 后运行 analyze.py --html。综合页面为每组生成单独的分析页，保留可折叠原始数据。原生 summary 的时间桶决定分段；累计命中率按 token 求和。指定 --theory-run 时使用同区间无限容量全保留参考组计算分段达标率。连续回放的逐请求文件覆盖全程，断点续跑则单独标出本阶段回退样本范围。已有 btc-request-report-v1 格式报告数据也可直接复现按请求数分段的原版报告：
+跨版本或显式指定理论基线时安装 Matplotlib。综合页面为每组生成单独的分析页，保留可折叠原始数据。原生 summary 的时间桶决定分段；累计命中率按 token 求和。指定 --theory-run 时使用同区间无限容量全保留参考组计算分段达标率。连续回放的逐请求文件覆盖全程，断点续跑则单独标出本阶段回退样本范围。已有 btc-request-report-v1 格式报告数据也可直接复现按请求数分段的原版报告：
 
 ```sh
 python3 "$S/charts.py" report-metrics.json report

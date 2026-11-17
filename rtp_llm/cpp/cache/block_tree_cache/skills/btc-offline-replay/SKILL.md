@@ -42,8 +42,6 @@ JSONL 每行是一条请求。下面是一条合成的 prefill 请求，假设�
 
 auto 的成功条件包含元数据池检查及原生回放验证；失败时报告阻断的源码接口。分配保留逻辑 ID、容量和引用，只省略 KV payload。迁移通过逻辑完成回调保留状态更新。
 
-用 scripts/analyze.py --html report.html 对照多组结果，第一个目录作为达标率基准。报告统计区间、输入 token 总数、FULL 与联合命中率，并标明配置与后端版本。逐请求文件仅包含本次执行新增的记录。
+默认交付当前 BTC 版本的独立 HTML 报告：`python3 scripts/analyze.py RUN --html report.html`。只传本次回放目录。开头分项列出日志来源、数据时间、采集集群、prefill IP、预热和正式请求数、后端提交及各层容量。按联合、FULL、分层命中率排序，每项依次画累计图和分段图。正式请求按到达时间十等分，点上标百分比，图下折叠精确计数。分层用同一次联合匹配的 Device、Host、Disk 来源，以输入 token 数为分母。缺失字段标为未记录。只有明确要求对比时才传多个版本或理论基线。差值单位用 pp。
 
-[使用说明、命令及输入输出契约](references/usage.md)
-
-生成综合分析页需要 Matplotlib。每组有分段及累计命中率、联合/FULL 比例、长度差及分位数曲线。有同区间的无限容量全保留基准时加入 --theory-run。
+[使用说明、环境字段和可选对比](references/usage.md)
