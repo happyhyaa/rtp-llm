@@ -1,11 +1,14 @@
 #pragma once
 
+#include <functional>
+#include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
 #include <array>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
 #include <memory>
 #include <optional>
 #include <string>
@@ -87,6 +90,28 @@ using BlockTreeTransferBytes = std::unordered_map<BlockTreeTransferBytesKey, siz
 class BlockTreeCacheMetricsReporter final {
 public:
     explicit BlockTreeCacheMetricsReporter(std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter);
+    // Configure before starting cache workers. Observer must not re-enter BTC.
+    using EvictionObserver = std::function<void(Tier, CacheGroupType, bool, size_t, size_t)>;
+    using CompletedEvictionObserver = std::function<void(Tier, Tier, CacheGroupType, const char*, size_t)>;
+    void setCompletedEvictionObserver(CompletedEvictionObserver observer) {
+        completed_eviction_observer_ = std::move(observer);
+    }
+    using EvictionTimer    = std::function<void(bool, uint64_t)>;
+    void setEvictionTimer(EvictionTimer timer) {
+        eviction_timer_ = std::move(timer);
+    }
+    auto measureEvictionPass(bool force) const {
+        using Clock = std::chrono::steady_clock;
+        auto start  = eviction_timer_ ? Clock::now() : Clock::time_point{};
+        return block_tree_cache_detail::ScopeRollback([this, force, start] {
+            if (eviction_timer_)
+                eviction_timer_(force,
+                                std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - start).count());
+        });
+    }
+    void setEvictionObserver(EvictionObserver observer) {
+        eviction_observer_ = std::move(observer);
+    }
 
     std::vector<BlockTreePoolMetricsSnapshot>
     collectPoolMetricsSnapshots(const std::vector<GroupSetPtr>&       group_sets,
@@ -134,6 +159,9 @@ public:
     void reportQueueBacklog(const BlockTreeQueueSizes& queue_sizes, const char* pool_type) const;
 
 private:
+    EvictionTimer    eviction_timer_;
+    CompletedEvictionObserver completed_eviction_observer_;
+    EvictionObserver eviction_observer_;
     struct PoolIOSample {
         size_t                                read_bytes{0};
         size_t                                write_bytes{0};

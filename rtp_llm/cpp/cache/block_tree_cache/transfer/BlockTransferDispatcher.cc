@@ -25,6 +25,18 @@ BlockTransferDispatcher::BlockTransferDispatcher(std::shared_ptr<PerRankBlockTra
     RTP_LLM_CHECK(max_descriptors_per_batch_ > 0);
 }
 
+BlockTransferDispatcher::BlockTransferDispatcher(WithSubmitter, Submitter submitter, size_t max_descriptors_per_batch):
+    submitter_(std::move(submitter)), max_descriptors_per_batch_(max_descriptors_per_batch) {
+    RTP_LLM_CHECK(submitter_ && max_descriptors_per_batch_ > 0);
+}
+
+bool BlockTransferDispatcher::hasPendingTransfers() const {
+    std::lock_guard<std::mutex> lock(completion_mutex_);
+    return std::any_of(transfer_completions_.begin(), transfer_completions_.end(), [](const auto& future) {
+        return future.wait_for(std::chrono::seconds(0)) != std::future_status::ready;
+    });
+}
+
 BlockTransferDispatcher::~BlockTransferDispatcher() {
     drainTransfers();
 }
@@ -58,6 +70,9 @@ std::shared_ptr<TransferAsyncContext> BlockTransferDispatcher::executePerRank(Tr
                            CacheCopyError::NOT_EXECUTED),
             task.descriptors().size());
     }
+    if (submitter_)
+        return submitter_(std::move(task));
+    RTP_LLM_CHECK(per_rank_engine_ != nullptr);
     return per_rank_engine_->execute(std::move(task));
 }
 
@@ -72,28 +87,30 @@ void BlockTransferDispatcher::runTransfer(TransferTask task, TransferDoneCallbac
     auto completion = std::make_shared<std::promise<void>>();
     {
         std::lock_guard<std::mutex> lock(completion_mutex_);
-        transfer_completions_.erase(
-            std::remove_if(transfer_completions_.begin(), transfer_completions_.end(), [](const auto& future) {
-                return future.wait_for(std::chrono::seconds(0)) == std::future_status::ready;
-            }),
-            transfer_completions_.end());
+        transfer_completions_.erase(std::remove_if(transfer_completions_.begin(),
+                                                   transfer_completions_.end(),
+                                                   [](const auto& future) {
+                                                       return future.wait_for(std::chrono::seconds(0))
+                                                              == std::future_status::ready;
+                                                   }),
+                                    transfer_completions_.end());
         transfer_completions_.push_back(completion->get_future().share());
     }
-    callback =
-        [completion, block_count = task.descriptors().size(), done = std::move(callback)](TransferResult result) {
-            result.expandBlockErrors(block_count);
-            // Context readiness can precede callback execution. Drain only after
-            // the callback has submitted settlement (also on an exception).
-            block_tree_cache_detail::ScopeRollback completed([&] { completion->set_value(); });
-            if (!result.ok()) {
-                RTP_LLM_LOG_ERROR("block transfer failed: descriptor_count=%zu, error_type=%s, error_code=%d, details=%s",
-                                  block_count,
-                                  cacheCopyErrorName(result.copy_error),
-                                  static_cast<int>(result.status.code()),
-                                  result.status.ToString().c_str());
-            }
-            done(std::move(result));
-        };
+    callback = [completion, block_count = task.descriptors().size(), done = std::move(callback)](
+                   TransferResult result) {
+        result.expandBlockErrors(block_count);
+        // Context readiness can precede callback execution. Drain only after
+        // the callback has submitted settlement (also on an exception).
+        block_tree_cache_detail::ScopeRollback completed([&] { completion->set_value(); });
+        if (!result.ok()) {
+            RTP_LLM_LOG_ERROR("block transfer failed: descriptor_count=%zu, error_type=%s, error_code=%d, details=%s",
+                              block_count,
+                              cacheCopyErrorName(result.copy_error),
+                              static_cast<int>(result.status.code()),
+                              result.status.ToString().c_str());
+        }
+        done(std::move(result));
+    };
     const auto& descriptors = task.descriptors();
     if (descriptors.empty()) {
         callback(ErrorInfo(ErrorCode::INVALID_PARAMS, "transfer task contains no descriptors"));
@@ -159,11 +176,12 @@ void BlockTransferDispatcher::runTransfer(TransferTask task, TransferDoneCallbac
 }
 
 void BlockTransferDispatcher::cancelPendingStagingTransfers() const {
-    per_rank_engine_->cancelPendingStagingTransfers();
+    if (per_rank_engine_)
+        per_rank_engine_->cancelPendingStagingTransfers();
 }
 
 BlockTreeQueueSizes BlockTransferDispatcher::queueSizes() const {
-    return per_rank_engine_->queueSizes();
+    return per_rank_engine_ ? per_rank_engine_->queueSizes() : BlockTreeQueueSizes{};
 }
 
 }  // namespace rtp_llm

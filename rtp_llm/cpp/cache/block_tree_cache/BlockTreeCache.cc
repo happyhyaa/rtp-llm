@@ -176,6 +176,7 @@ size_t BlockTreeCache::insert(const CacheKeysType&                              
 }
 
 int BlockTreeCache::evictForGroup(std::string_view group_tag, size_t num_blocks) {
+    auto                        timing = metrics_reporter_->measureEvictionPass(true);
     std::lock_guard<std::mutex> lock(mutex_);
     if (!config_.isTierEnabled(Tier::DEVICE)) {
         return 0;
@@ -279,6 +280,7 @@ void BlockTreeCache::onWorkflowSettledLocked(bool check_watermark) {
 }
 
 void BlockTreeCache::checkWatermark() {
+    auto timing = metrics_reporter_->measureEvictionPass(false);
     for (Tier tier : {Tier::DISK, Tier::HOST, Tier::DEVICE}) {
         const auto watermark = config_.watermarkForTier(tier);
         if (!config_.isTierEnabled(tier) || !watermark.enabled()) {

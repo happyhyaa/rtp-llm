@@ -99,6 +99,11 @@ bool HostBlockPool::init() {
                             cfg.stride_bytes,
                             cfg.alignment);
 
+    if (cfg.metadata_only) {
+        markInitialized();
+        return true;
+    }
+
     // block 0's slot is allocated as backing but is never handed out by malloc().
     const size_t total_bytes = cfg.physical_block_count * cfg.stride_bytes;
     backing_.emplace(total_bytes, cfg.alignment, cfg.pool_name);
@@ -119,6 +124,7 @@ bool HostBlockPool::init() {
 }
 
 HostBlockBuffer HostBlockPool::blockBuffer(BlockIdxType block) const {
+    RTP_LLM_CHECK_WITH_INFO(!config().metadata_only, "metadata-only pool has no KV address");
     RTP_LLM_CHECK(initialized());
     RTP_LLM_CHECK(validBlock(block));
     const auto& cfg  = config();

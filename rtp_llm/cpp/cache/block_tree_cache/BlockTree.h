@@ -45,6 +45,7 @@ struct BlockTreeNodeRangeResult {
 };
 
 class BlockTree {
+    friend class BlockTreeMetadataCheckpoint;
 public:
     explicit BlockTree(std::vector<GroupSetPtr> group_sets);
     ~BlockTree();

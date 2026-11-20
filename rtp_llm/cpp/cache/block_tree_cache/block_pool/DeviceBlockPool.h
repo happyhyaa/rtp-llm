@@ -33,6 +33,7 @@ class DeviceBlockPool;
 using DeviceBlockPoolPtr = std::shared_ptr<DeviceBlockPool>;
 
 class DeviceBlockPool: public IBlockPool {
+    friend class BlockTreeMetadataCheckpoint;
 public:
     explicit DeviceBlockPool(std::shared_ptr<const DeviceBlockPoolConfig> config);
     ~DeviceBlockPool() override;
@@ -88,8 +89,10 @@ public:
     const DeviceBlockPoolConfig& config() const;
 
     void* getBaseAddress() const {
+        RTP_LLM_CHECK_WITH_INFO(!config().metadata_only, "metadata-only pool has no KV address");
         return cache_base_ptr_;
     }
+    size_t getAllocationSizeBytes() const { return cache_aligned_buffer_.defined() ? cache_aligned_buffer_.nbytes() : 0; }
     size_t getTotalSizeBytes() const;
     size_t blockSizeBytes() const override;
 

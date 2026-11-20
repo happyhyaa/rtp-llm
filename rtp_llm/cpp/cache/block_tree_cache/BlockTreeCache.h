@@ -185,6 +185,8 @@ private:
     // Caller holds mutex_.
     void onWorkflowSettledLocked(bool check_watermark);
 
+    friend class BlockTreeMetadataCheckpoint;
+
     BlockTreeCacheConfig                           config_;
     std::unique_ptr<BlockTree>                     tree_;
     std::shared_ptr<StorageBackend>                storage_backend_;

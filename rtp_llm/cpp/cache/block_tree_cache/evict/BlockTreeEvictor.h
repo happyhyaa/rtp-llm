@@ -45,6 +45,7 @@ struct CandidateStats {
 // heap membership. BlockTreeCache reports semantic events; GroupSet only
 // provides group-set-specific evictability and resource lifecycle operations.
 class BlockTreeEvictor {
+    friend class BlockTreeMetadataCheckpoint;
 public:
     using IsTierEnabledFn = std::function<bool(Tier)>;
     using SettledFn       = std::function<void(bool check_watermark)>;

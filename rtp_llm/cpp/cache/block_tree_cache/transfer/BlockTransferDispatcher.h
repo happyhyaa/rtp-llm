@@ -21,8 +21,13 @@ public:
     using TransferDoneCallback = std::function<void(TransferResult)>;
 
     BlockTransferDispatcher(std::shared_ptr<PerRankBlockTransferEngine>   per_rank_engine,
-                            std::shared_ptr<MultiRankBlockTransferEngine> multi_rank_engine = nullptr,
+                            std::shared_ptr<MultiRankBlockTransferEngine> multi_rank_engine         = nullptr,
                             size_t                                        max_descriptors_per_batch = 8);
+    // Inject an executor without constructing physical transfer engines.
+    using Submitter = std::function<std::shared_ptr<TransferAsyncContext>(TransferTask)>;
+    struct WithSubmitter {};
+    BlockTransferDispatcher(WithSubmitter, Submitter submitter, size_t max_descriptors_per_batch = 8);
+    bool hasPendingTransfers() const;
     ~BlockTransferDispatcher();
 
     std::shared_ptr<TransferAsyncContext> executePerRank(TransferTask task) const;
@@ -42,9 +47,10 @@ private:
 
     std::shared_ptr<PerRankBlockTransferEngine>   per_rank_engine_;
     std::shared_ptr<MultiRankBlockTransferEngine> multi_rank_engine_;
+    Submitter                                     submitter_;
     size_t                                        max_descriptors_per_batch_{8};
     mutable std::mutex                            completion_mutex_;
-    mutable std::vector<std::shared_future<void>>  transfer_completions_;
+    mutable std::vector<std::shared_future<void>> transfer_completions_;
     std::function<void()>                         drain_observer_for_test_;
 };
 

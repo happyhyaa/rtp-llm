@@ -87,6 +87,11 @@ bool BlockTreeDiskBlockPool::init() {
     RTP_LLM_CHECK_WITH_INFO(
         !cfg.work_dir.empty(), "disk block pool [%s] work_dir must not be empty", cfg.pool_name.c_str());
 
+    if (cfg.metadata_only) {
+        markInitialized();
+        return true;
+    }
+
     std::string effective_dir = cfg.work_dir;
     if (cfg.mount_guard != nullptr) {
         effective_dir = cfg.mount_guard->workDir();
@@ -114,6 +119,7 @@ bool BlockTreeDiskBlockPool::init() {
 
 BlockIOStatus BlockTreeDiskBlockPool::read(BlockIdxType block, void* dst, size_t bytes) {
     RTP_LLM_CHECK(initialized());
+    RTP_LLM_CHECK_WITH_INFO(!config().metadata_only, "metadata-only pool forbids payload IO");
     if (!validBlock(block)) {
         return BlockIOStatus::INVALID_BLOCK;
     }
@@ -129,6 +135,7 @@ BlockIOStatus BlockTreeDiskBlockPool::read(BlockIdxType block, void* dst, size_t
 
 BlockIOStatus BlockTreeDiskBlockPool::write(BlockIdxType block, const void* src, size_t bytes) {
     RTP_LLM_CHECK(initialized());
+    RTP_LLM_CHECK_WITH_INFO(!config().metadata_only, "metadata-only pool forbids payload IO");
     if (!validBlock(block)) {
         return BlockIOStatus::INVALID_BLOCK;
     }
@@ -145,6 +152,7 @@ BlockIOStatus BlockTreeDiskBlockPool::write(BlockIdxType block, const void* src,
 BlockIOStatus
 BlockTreeDiskBlockPool::read(const BlockIdList& blocks, const std::vector<void*>& dsts, size_t bytes_per_block) {
     RTP_LLM_CHECK(initialized());
+    RTP_LLM_CHECK_WITH_INFO(!config().metadata_only, "metadata-only pool forbids payload IO");
     RTP_LLM_CHECK_WITH_INFO(blocks.size() == dsts.size(),
                             "disk block pool [%s] batch read blocks/dsts size mismatch, blocks=[%zu] dsts=[%zu]",
                             poolName().c_str(),
@@ -174,6 +182,7 @@ BlockTreeDiskBlockPool::read(const BlockIdList& blocks, const std::vector<void*>
 BlockIOStatus
 BlockTreeDiskBlockPool::write(const BlockIdList& blocks, const std::vector<const void*>& srcs, size_t bytes_per_block) {
     RTP_LLM_CHECK(initialized());
+    RTP_LLM_CHECK_WITH_INFO(!config().metadata_only, "metadata-only pool forbids payload IO");
     RTP_LLM_CHECK_WITH_INFO(blocks.size() == srcs.size(),
                             "disk block pool [%s] batch write blocks/srcs size mismatch, blocks=[%zu] srcs=[%zu]",
                             poolName().c_str(),
