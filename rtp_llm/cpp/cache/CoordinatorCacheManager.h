@@ -240,6 +240,7 @@ protected:
     struct PreparedKVCache {
         size_t                         matched_device_blocks = 0;
         size_t                         total_logical_blocks  = 0;
+        size_t                         matched_full_blocks{0};
         std::vector<RequiredPositions> required_positions;
         std::vector<BlockIndicesType>  referenced_blocks;
         std::vector<size_t>            original_sizes;

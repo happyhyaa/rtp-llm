@@ -64,6 +64,7 @@ BlockTreeMatchResult BlockTreeLoader::matchLocked(const CacheKeysType&          
 
 bool BlockTreeLoader::validMatch(std::vector<TreeNode*>&            path,
                                  std::vector<bool>&                 candidate_valid,
+                                 size_t&                            full_blocks,
                                  const std::function<bool(size_t)>& valid_prefix) const {
     size_t valid_block_count = 0;
     candidate_valid.reserve(path.size());
@@ -75,12 +76,20 @@ bool BlockTreeLoader::validMatch(std::vector<TreeNode*>&            path,
     for (size_t i = 0; i < path.size(); ++i) {
         TreeNode* node             = path[i];
         bool      all_groups_valid = true;
+        bool      full_valid       = true;
         for (size_t group_set_id = 0; group_set_id < tree_->groupSets().size(); ++group_set_id) {
             if (!match_validators[group_set_id]->validate(node->group_set_resources[group_set_id])) {
                 all_groups_valid = false;
+                if (tree_->groupSets()[group_set_id]->groupType() == CacheGroupType::FULL) {
+                    full_valid = false;
+                }
             }
         }
-        all_groups_valid = all_groups_valid && (!valid_prefix || valid_prefix(i + 1));
+        const bool allowed = !valid_prefix || valid_prefix(i + 1);
+        if (full_valid && allowed) {
+            full_blocks = i + 1;
+        }
+        all_groups_valid = all_groups_valid && allowed;
         if (all_groups_valid) {
             valid_block_count = i + 1;
         }
@@ -146,7 +155,8 @@ BlockTreeMatchResult BlockTreeLoader::createMatchResult(std::vector<TreeNode*>& 
                                                         const std::function<bool(size_t)>& valid_prefix) {
     BlockTreeMatchResult result;
     std::vector<bool>    candidate_valid;
-    if (!path.empty() && !validMatch(path, candidate_valid, valid_prefix) && !storage_backend_) {
+    if (!path.empty() && !validMatch(path, candidate_valid, result.matched_full_blocks, valid_prefix)
+        && !storage_backend_) {
         return result;
     }
     const int64_t  access_time_us = currentTimeUs();

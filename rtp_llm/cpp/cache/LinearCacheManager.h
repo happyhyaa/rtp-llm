@@ -1,5 +1,7 @@
 #pragma once
 
+#include "rtp_llm/cpp/cache/LinearCheckpointPositions.h"
+
 #include <memory>
 #include <limits>
 #include <vector>
@@ -44,6 +46,7 @@ public:
                          std::vector<size_t>* backfilled_positions = nullptr) override;
 
     void removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache = false, int reserve_step = 0) override;
+    void removeSkippedBlocks(BlockIds& block_ids, int reserve_step, const LinearCheckpointPositions& checkpoints);
     int  needBlocksNum(int seq_len, int current_blocks, int reserve_step = 0) const override;
     int  estimatePeakNeedBlocks(int                     seq_len,
                                 const BlockIndicesType& current_block_indices,

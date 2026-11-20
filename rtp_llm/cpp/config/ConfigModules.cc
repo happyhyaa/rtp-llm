@@ -143,6 +143,7 @@ std::string KVCacheConfig::to_string() const {
         << "block_tree_memory_evict_high_watermark_ratio: " << block_tree_memory_evict_high_watermark_ratio << "\n"
         << "block_tree_disk_evict_low_watermark_ratio: " << block_tree_disk_evict_low_watermark_ratio << "\n"
         << "block_tree_disk_evict_high_watermark_ratio: " << block_tree_disk_evict_high_watermark_ratio << "\n"
+        << "linear_endpoint_points: " << linear_endpoint_points << "\n"
         << "reuse_cache_tail_blocks: " << reuse_cache_tail_blocks << "\n"
         << "linear_pool_blocks: " << linear_pool_blocks << "\n"
         << "swa_pool_blocks: " << swa_pool_blocks << "\n"

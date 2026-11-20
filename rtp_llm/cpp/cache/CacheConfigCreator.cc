@@ -410,6 +410,11 @@ CacheConfig CacheConfigCreator::createBasicConfig(const ModelConfig&       model
     auto config =
         createConfigFromDescs(model_config, parallelism_config, kv_cache_config, gen_num_per_cycle, global_layer_begin);
     RTP_LLM_CHECK_WITH_INFO(kv_cache_config.reuse_cache_tail_blocks > 0, "reuse_cache_tail_blocks must be positive");
+    const int points = kv_cache_config.linear_endpoint_points;
+    RTP_LLM_CHECK_WITH_INFO(
+        points == 0 || (points >= 2 && kv_cache_config.reuse_cache_tail_blocks == std::numeric_limits<int>::max()),
+        "linear_endpoint_points requires n >= 2 and is exclusive with reuse_cache_tail_blocks");
+    config.linear_endpoint_points  = points;
     config.reuse_cache_tail_blocks = kv_cache_config.reuse_cache_tail_blocks;
     auto groups                    = config.topology().groups();
     for (auto& group : groups) {

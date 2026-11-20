@@ -533,6 +533,7 @@ std::string CacheConfig::debugString(size_t indent) const {
 
     os << indent1 << "# Attention Configuration:\n";
     OUTPUT_FIELD(reuse_cache_tail_blocks);
+    OUTPUT_FIELD(linear_endpoint_points);
     OUTPUT_FIELD_EXPR("full_group_num",
                       std::count_if(topology_groups.begin(), topology_groups.end(), [](const GroupBase& group) {
                           return group.policy.group_type == CacheGroupType::FULL;

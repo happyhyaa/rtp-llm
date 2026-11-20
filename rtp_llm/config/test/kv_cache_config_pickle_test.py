@@ -19,8 +19,8 @@ class KVCacheConfigPickleTest(TestCase):
             with self.subTest(enable_crc=enable_crc):
                 config.enable_crc = enable_crc
                 state = config.__getstate__()
-                self.assertEqual(len(state), 72)
-                self.assertEqual(state[:2], ("KVCacheConfig", 9))
+                self.assertEqual(len(state), 73)
+                self.assertEqual(state[:2], ("KVCacheConfig", 10))
                 self.assertEqual(
                     state[64:69], tuple(KV_CACHE_EVENT_FIELD_VALUES.values())
                 )
@@ -83,6 +83,15 @@ class KVCacheConfigPickleTest(TestCase):
             self.assertEqual(config.swa_pool_blocks, 17)
         self.assertFalse(hasattr(config, "linear_step"))
         self.assertFalse(hasattr(config, "linear_cache_tail_blocks"))
+
+    def test_linear_endpoint_points_round_trip_and_v9_default(self):
+        config = KVCacheConfig()
+        config.linear_endpoint_points = 5
+        self.assertEqual(pickle.loads(pickle.dumps(config)).linear_endpoint_points, 5)
+        state = config.__getstate__()
+        restored = KVCacheConfig.__new__(KVCacheConfig)
+        restored.__setstate__((state[0], 9, *state[2:72]))
+        self.assertEqual(restored.linear_endpoint_points, 0)
 
     def test_version_eight_uses_new_retention_defaults(self):
         source = KVCacheConfig()

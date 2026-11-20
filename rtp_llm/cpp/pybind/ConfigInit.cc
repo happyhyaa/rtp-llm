@@ -506,6 +506,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                        &KVCacheConfig::block_tree_disk_evict_low_watermark_ratio)
         .def_readwrite("block_tree_disk_evict_high_watermark_ratio",
                        &KVCacheConfig::block_tree_disk_evict_high_watermark_ratio)
+        .def_readwrite("linear_endpoint_points", &KVCacheConfig::linear_endpoint_points)
         .def_readwrite("reuse_cache_tail_blocks", &KVCacheConfig::reuse_cache_tail_blocks)
         .def_readwrite("linear_pool_blocks", &KVCacheConfig::linear_pool_blocks)
         .def_readwrite("swa_pool_blocks", &KVCacheConfig::swa_pool_blocks)
@@ -576,7 +577,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(py::pickle(
             [](const KVCacheConfig& self) {
                 return py::make_tuple(std::string("KVCacheConfig"),
-                                      9,
+                                      10,
                                       self.reuse_cache,
                                       self.multi_task_prompt,
                                       self.multi_task_prompt_str,
@@ -646,9 +647,16 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.kv_cache_event_host_ip_port,
                                       self.enable_crc,
                                       self.linear_pool_blocks,
-                                      self.swa_pool_blocks);
+                                      self.swa_pool_blocks,
+                                      self.linear_endpoint_points);
             },
             [](py::tuple t) {
+                int endpoint_points = 0;
+                if (t.size() == 73 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 10) {
+                    endpoint_points = t[72].cast<int>();
+                    t               = t[py::slice(0, 72, 1)].cast<py::tuple>();
+                    t[1]            = py::int_(9);
+                }
                 const py::tuple tail_state = t;
                 const bool has_tail_fields = t.size() == 72 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 9;
                 if (has_tail_fields) {
@@ -706,6 +714,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 c.memory_cache_sync_timeout_ms = value(7).cast<int64_t>();
                 if (has_tail_fields) {
                     c.reuse_cache_tail_blocks = tail_state[10].cast<int>();
+                    c.linear_endpoint_points  = endpoint_points;
                     c.linear_pool_blocks      = tail_state[70].cast<uint32_t>();
                     c.swa_pool_blocks         = tail_state[71].cast<uint32_t>();
                     if (c.reuse_cache_tail_blocks <= 0 || c.linear_pool_blocks == 1 || c.swa_pool_blocks == 1

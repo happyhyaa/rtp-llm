@@ -2310,6 +2310,48 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, PrefillInitSkipsSparseCleanupAndPr
     EXPECT_FALSE(isNullBlockIdx(linear_out[4]));
 }
 
+TEST_F(HybridTypeCoordinatorCacheManagerTest, LinearCheckpointsFollowFullEndpointBeyondJointMatch) {
+    auto config                    = makeTinyHybridConfig();
+    config.linear_endpoint_points  = 3;
+    config.reuse_cache_tail_blocks = std::numeric_limits<int>::max();
+    setGroupBlockCounts(config, 32, 32);
+    auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
+    ASSERT_TRUE(allocator->init());
+
+    // Seed four FULL blocks but only the first Linear checkpoint.
+    CacheKeysType keys{100, 101, 102, 103, 104, 105, 106, 107};
+    auto          seed = makeBatchResource(1, config, CacheKeysType(keys.begin(), keys.begin() + 4));
+    seed->mutableBlockIds(0, "full1").assign(allocateReferencedBlocks(poolForTag(*allocator, "full1"), 4));
+    auto& linear = seed->mutableBlockIds(0, "linear");
+    linear.resize(4);
+    linear.setAt(0, allocateReferencedBlocks(poolForTag(*allocator, "linear"), 1).front());
+    size_t resident = 0;
+    allocator->insertIntoCache(InsertInfo{seed, nullptr, false}, resident);
+    allocator->free(FreeInfo{seed, nullptr});
+
+    auto       resource = makeBatchResource(1, config, keys);
+    auto       tokens   = makeCompleteTokenIds(1, 33, 4);  // Eight complete blocks and a partial working tail.
+    const auto matched  = allocator->malloc(MallocInfo{resource, tokens});
+    ASSERT_TRUE(matched.success);
+    EXPECT_EQ(matched.reuse_len, 4);
+    const auto& blocks = resource->blocks(0, "linear");
+    ASSERT_EQ(blocks.size(), 9u);
+    for (int i = 0; i < 9; ++i) {
+        EXPECT_EQ(!isNullBlockIdx(blocks[i]), i == 0 || i == 3 || i == 5 || i == 7 || i == 8);
+    }
+    allocator->insertIntoCache(InsertInfo{resource, tokens, false}, resident);
+    allocator->free(FreeInfo{resource, tokens});
+
+    // A diverging suffix can now resume at the interior checkpoint (depth six).
+    keys[6]          = 200;
+    keys[7]          = 201;
+    auto       next  = makeBatchResource(1, config, keys);
+    const auto reuse = allocator->malloc(MallocInfo{next, tokens});
+    ASSERT_TRUE(reuse.success);
+    EXPECT_EQ(reuse.reuse_len, 24);
+    allocator->free(FreeInfo{next, tokens});
+}
+
 TEST_F(HybridTypeCoordinatorCacheManagerTest, PrefillReuseTailAllocatesExactCapacityWithoutBackfill) {
     for (const int tail : {3, std::numeric_limits<int>::max()}) {
         for (const int reuse_slots : {2, 4, 5}) {

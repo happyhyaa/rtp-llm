@@ -77,6 +77,12 @@ RequiredPositions chunkCachePositions(const MallocInfo& malloc_info, const Group
             positions.insert(pos);
         }
     }
+    if (group.policy.group_type == CacheGroupType::LINEAR && group.policy.enable_prefix_reuse
+        && malloc_info.reuse_cache) {
+        for (auto pos : malloc_info.batch_kv_cache_resource->linear_checkpoints.toCompute()) {
+            positions.insert(pos);
+        }
+    }
     return positions;
 }
 
@@ -519,6 +525,7 @@ CoordinatorCacheManager::prepareKVCache(const CacheKeysType&                 cac
     const int                         cp_scale     = (cp_mapper && cp_mapper->isSharded()) ? cp_mapper->cpSize() : 1;
     BlockTreeMatchResult              match_result = block_tree_cache_->match(cache_keys, valid_prefix);
     std::shared_ptr<LoadAsyncContext> load_context = std::move(match_result.async_context);
+    prepared.matched_full_blocks                   = match_result.matched_full_blocks;
     prepared.matched_device_blocks                 = match_result.matched_device_blocks;
     prepared.total_logical_blocks =
         load_context ? load_context->localMatchedBlocks() : match_result.matched_device_blocks;
@@ -662,6 +669,16 @@ bool CoordinatorCacheManager::materializeInitialBlocks(const MallocInfo& malloc_
     auto&       kv_resource = *malloc_info.batch_kv_cache_resource;
     const auto& cp_mapper   = cp_slot_mapper_;
     const int   cp_scale    = cp_mapper && cp_mapper->isSharded() ? cp_mapper->cpSize() : 1;
+    if (config_.linear_endpoint_points && malloc_info.reuse_cache && !linear_group_ids_.empty()
+        && !full_group_ids_.empty()) {
+        const int unit = cp_mapper ? cp_mapper->reuseBlockTokens(config_) : seqSizePerBlock();
+        kv_resource.linear_checkpoints =
+            LinearCheckpointPositions::select(std::max(prepared.matched_full_blocks, matched_blocks),
+                                              malloc_info.complete_token_ids->seqLength() / unit,
+                                              config_.linear_endpoint_points,
+                                              cp_scale,
+                                              matched_blocks);
+    }
     prepared.required_positions.assign(kv_cache_groups_.size(), {});
 
     if (matched_blocks > 0) {
@@ -850,6 +867,13 @@ MallocResult CoordinatorCacheManager::incrMalloc(const MallocInfo& malloc_info) 
         for (int b = 0; b < batch_size; ++b) {
             for (int group_id = 0; group_id < config_.groupNums(); ++group_id) {
                 const auto& tag = config_.groupTags()[static_cast<size_t>(group_id)];
+                if (kv_resource->linear_checkpoints.enabled()
+                    && config_.group(tag).policy.group_type == CacheGroupType::LINEAR) {
+                    static_cast<LinearCacheManager&>(*kv_cache_groups_[group_id])
+                        .removeSkippedBlocks(
+                            kv_resource->mutableBlockIds(b, tag), reserve_step, kv_resource->linear_checkpoints);
+                    continue;
+                }
                 kv_cache_groups_[static_cast<size_t>(group_id)]->removeSkippedBlocks(
                     kv_resource->mutableBlockIds(b, tag), malloc_info.reuse_cache, reserve_step);
             }
@@ -1007,6 +1031,10 @@ void CoordinatorCacheManager::insertIntoCache(const InsertInfo& insert_info, siz
                 const auto& blocks = kv_cache_resource->blocks(batch_id, tag);
                 for (size_t i = 0; i < insert_keys.size(); ++i) {
                     const size_t position = sparse_logical ? (i + 1) * static_cast<size_t>(cp_mapper->cpSize()) - 1 : i;
+                    if (type == CacheGroupType::LINEAR && kv_cache_resource->linear_checkpoints.enabled()
+                        && !kv_cache_resource->linear_checkpoints.contains(position)) {
+                        continue;
+                    }
                     if (position >= blocks.size() || isNullBlockIdx(blocks[position])) {
                         continue;
                     }
@@ -1672,7 +1700,10 @@ bool CoordinatorCacheManager::doInit() {
         SingleTypeCacheManagerPtr group;
         if (group_type == CacheGroupType::LINEAR) {
             group = std::make_shared<LinearCacheManager>(
-                cache_group, group_pool, group_id, config_.reuse_cache_tail_blocks);
+                cache_group,
+                group_pool,
+                group_id,
+                config_.linear_endpoint_points ? 1 : config_.reuse_cache_tail_blocks);
             linear_group_ids_.push_back(group_id);
         } else if (group_type == CacheGroupType::SWA) {
             group =

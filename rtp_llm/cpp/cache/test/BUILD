@@ -531,3 +531,9 @@ cc_test(
         "@com_google_googletest//:gtest_main",
     ],
 )
+
+cc_test(
+    name = "linear_checkpoint_positions_test",
+    srcs = ["LinearCheckpointPositionsTest.cc"],
+    deps = ["//rtp_llm/cpp/cache:linear_checkpoint_positions"],
+)

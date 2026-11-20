@@ -252,6 +252,12 @@ cc_library(
 )
 
 cc_library(
+    name = "linear_checkpoint_positions",
+    hdrs = ["LinearCheckpointPositions.h"],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "single_type_cache_manager",
     srcs = [
         "FullCacheManager.cc",
@@ -268,6 +274,7 @@ cc_library(
     copts = copts(),
     visibility = ["//visibility:public"],
     deps = [
+        ":linear_checkpoint_positions",
         ":cache_types",
         "//rtp_llm/cpp/cache/block_tree_cache:device_block_pool",
     ],
@@ -322,6 +329,7 @@ cc_library(
     copts = copts(),
     visibility = ["//visibility:public"],
     deps = [
+        ":linear_checkpoint_positions",
         ":cache_config",
         ":cache_group_type",
         "//rtp_llm/cpp/utils:core_utils",

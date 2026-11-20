@@ -1,5 +1,7 @@
 #pragma once
 
+#include "rtp_llm/cpp/cache/LinearCheckpointPositions.h"
+
 #include <memory>
 #include <sstream>
 #include <string>
@@ -90,7 +92,10 @@ public:
         return batch_resource[batch_id];
     }
 
+    LinearCheckpointPositions linear_checkpoints;
+
     void clearBlocks() {
+        linear_checkpoints = {};
         resizeBlocks(0, 0);
     }
 
@@ -175,6 +180,7 @@ public:
     }
 
     void swap(BatchKVCacheResource& other) noexcept {
+        std::swap(linear_checkpoints, other.linear_checkpoints);
         batch_resource.swap(other.batch_resource);
         std::swap(cache_keys_initialized_, other.cache_keys_initialized_);
     }

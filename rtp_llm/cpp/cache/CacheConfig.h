@@ -62,6 +62,7 @@ public:
     size_t seq_size_per_block = 1;  // tokens/base cache-key block; groups may cover multiple key blocks
 
     // Attention-specific configuration
+    int linear_endpoint_points  = 0;
     int reuse_cache_tail_blocks = std::numeric_limits<int>::max();
 
     // mtp-model configurations

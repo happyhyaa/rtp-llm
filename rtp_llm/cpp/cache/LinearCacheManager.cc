@@ -281,17 +281,22 @@ bool LinearCacheManager::mallocImpl(BlockIds&                block_ids,
 }
 
 void LinearCacheManager::removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache, int reserve_step) {
+    removeSkippedBlocks(block_ids, reserve_step, {});
+}
+
+void LinearCacheManager::removeSkippedBlocks(BlockIds&                        block_ids,
+                                             int                              reserve_step,
+                                             const LinearCheckpointPositions& checkpoints) {
     const auto& block_indices = block_ids.blocks();
     if (block_indices.empty()) {
         return;
     }
-    (void)enable_reuse_cache;
     const int block_size = static_cast<int>(block_indices.size());
 
     BlockIndicesType    blocks_to_free;
     std::vector<size_t> pos_to_remove;
     for (int i = block_size - std::min(retainedDecodeBlocks(reserve_step), block_size) - 1; i >= 0; i--) {
-        if (isNullBlockIdx(block_indices[i])) {
+        if (isNullBlockIdx(block_indices[i]) || checkpoints.contains(i)) {
             continue;
         }
         blocks_to_free.push_back(block_indices[i]);

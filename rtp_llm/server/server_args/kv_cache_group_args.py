@@ -175,6 +175,14 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         help="Attention算子使用的kernel block大小（token数量）。0表示与seq_size_per_block相同。",
     )
     kv_cache_group.add_argument(
+        "--linear_endpoint_points",
+        env_name="LINEAR_ENDPOINT_POINTS",
+        bind_to=(kv_cache_config, "linear_endpoint_points"),
+        type=int,
+        default=0,
+        help="Linear prefill checkpoint count: 0 disables, N >= 2 selects the FULL endpoint, final complete block and evenly spaced interior blocks. Exclusive with a finite reuse_cache_tail_blocks.",
+    )
+    kv_cache_group.add_argument(
         "--reuse_cache_tail_blocks",
         env_name="REUSE_CACHE_TAIL_BLOCKS",
         bind_to=(kv_cache_config, "reuse_cache_tail_blocks"),
